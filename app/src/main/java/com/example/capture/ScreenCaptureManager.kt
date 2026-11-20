@@ -90,17 +90,20 @@ class ScreenCaptureManager(private val context: Context) {
 
     /**
      * Captures ONLY a freshly rendered frame from ImageReader (never returns stale cached bitmaps).
-     * Waits briefly up to [waitIfEmptyMs] if no new frame is immediately queued yet.
+     * Polls briefly every 6ms up to [waitIfEmptyMs] for the compositor to deliver the next frame.
      */
-    suspend fun captureFreshBitmap(waitIfEmptyMs: Long = 16L): Bitmap? = withContext(Dispatchers.Default) {
+    suspend fun captureFreshBitmap(waitIfEmptyMs: Long = 28L): Bitmap? = withContext(Dispatchers.Default) {
         val projection = mediaProjection ?: return@withContext null
         ensureOrientationMatchesDisplay(projection)
 
         val reader = imageReader ?: return@withContext null
         var image = acquireLatestSafe(reader)
         if (image == null && waitIfEmptyMs > 0L) {
-            delay(waitIfEmptyMs)
-            image = acquireLatestSafe(reader)
+            val deadline = System.currentTimeMillis() + waitIfEmptyMs
+            while (image == null && System.currentTimeMillis() < deadline) {
+                delay(6L)
+                image = acquireLatestSafe(reader)
+            }
         }
         if (image == null) {
             return@withContext null

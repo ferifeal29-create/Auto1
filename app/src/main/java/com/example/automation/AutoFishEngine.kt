@@ -12,18 +12,16 @@ import com.example.vision.BiteDetector
 import com.example.vision.DialogDetector
 import com.example.vision.MinigameAnalyzer
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.withContext
 import kotlin.math.abs
 
 /**
  * Finite-state automation engine executing the 3-phase Gridmere fishing loop:
  * Fase 1: Select Worm Bait Slot -> Tap Water Block to Cast
  * Fase 2: Detect Bite Cinematic Black Bars -> Tap Down Arrow (↓)
- * Fase 3: Zero-Gap Continuous Closed-Loop Minigame Tracking -> Pull (↓) when Cyan Bar Full -> Auto Sell/Keep -> Recast
+ * Fase 3: Fresh-Frame Velocity-Aware PD Minigame Tracking -> Pull (↓) when Cyan Bar Full -> Auto Sell/Keep -> Recast
  */
 class AutoFishEngine(
     private val captureManager: ScreenCaptureManager,
@@ -170,7 +168,7 @@ class AutoFishEngine(
                 return WaitOutcome.TIMED_OUT
             }
 
-            val bitmap = captureFreshSafe(waitIfEmptyMs = 16L)
+            val bitmap = captureFreshSafe(waitIfEmptyMs = 18L)
             if (bitmap != null) {
                 var dialogOpen = false
                 var minigameActive = false
@@ -233,7 +231,7 @@ class AutoFishEngine(
         for (probe in 0 until 28) {
             delay(80L)
             val latestConfig = configProvider()
-            val bmp = captureFreshSafe(waitIfEmptyMs = 16L) ?: continue
+            val bmp = captureFreshSafe(waitIfEmptyMs = 18L) ?: continue
 
             var dialogOpen = false
             var minigameActive = false
@@ -274,11 +272,10 @@ class AutoFishEngine(
     }
 
     /**
-     * Zero-gap closed-loop minigame controller:
-     * - Captures ONLY fresh display frames (never acts on stale cached frames)
-     * - Captures & analyzes in parallel DURING each 46ms continuous touch segment
-     * - Chains continuous holds via continueStroke (zero lift/drop gaps while chasing the fish)
-     * - Immediately releases/reverses when fish flips direction or centers in box
+     * Fast fresh-frame PD minigame controller using standard reliable tap gestures:
+     * - Waits for a genuinely fresh post-tap display frame before deciding next pulse (no stale-frame overshoot)
+     * - Uses velocity lead + fleeing/approaching pulse scaling for snappy response without jitter
+     * - Immediately taps ↓ when the thin cyan catch-progress bar reaches 100%
      */
     private suspend fun playMinigame(
         accessibility: AutoFishAccessibilityService,
@@ -295,236 +292,179 @@ class AutoFishEngine(
         var prevFrameTimeMs = 0L
         var smoothedFishVel = 0f
         var lastCatchPullAtMs = 0L
+        var consecutiveNullFrames = 0
 
-        var activeHold: AutoFishAccessibilityService.HoldHandle? = null
-        var activeHoldDir = 0 // -1 = left, 1 = right, 0 = none
-
-        try {
-            while (currentCoroutineContext().isActive) {
-                val config = configProvider()
-
-                // If currently holding a button, wait 24ms into the 46ms stroke before grabbing the fresh frame
-                if (activeHold != null) {
-                    delay(24L)
+        while (currentCoroutineContext().isActive) {
+            val config = configProvider()
+            val fresh = captureFreshSafe(waitIfEmptyMs = 28L)
+            val bitmap = if (fresh != null) {
+                consecutiveNullFrames = 0
+                fresh
+            } else {
+                consecutiveNullFrames++
+                if (consecutiveNullFrames >= 2) {
+                    consecutiveNullFrames = 0
+                    captureLatestSafe()
+                } else {
+                    null
                 }
+            }
+            if (bitmap == null) {
+                delay(12L)
+                continue
+            }
 
-                val bitmap = captureFreshSafe(waitIfEmptyMs = 16L)
-                if (bitmap == null) {
-                    if (activeHold != null) {
-                        val ok = activeHold.completion.await()
-                        activeHold = if (ok && activeHoldDir != 0) {
-                            val pt = pointForDir(config, activeHoldDir)
-                            accessibility.dispatchContinuousHold(activeHold, pt, segmentMs = 46L)
-                        } else {
-                            activeHoldDir = 0
-                            null
-                        }
-                    } else {
-                        delay(16L)
-                    }
+            var dialogVisible = false
+            var minigameActive = false
+            var fishX: Float? = null
+            var barX: Float? = null
+            var barWidth = 0.14f
+            var catchProgress = 0f
+            var isCatchReady = false
+
+            try {
+                val dialog = dialogDetector.detect(bitmap, config)
+                dialogVisible = dialog.isFishCaughtDialogVisible
+                if (!dialogVisible) {
+                    val analysis = minigameAnalyzer.analyze(bitmap, config)
+                    minigameActive = analysis.isMinigameActive
+                    fishX = analysis.fishX
+                    barX = analysis.barX
+                    barWidth = analysis.barWidth
+                    catchProgress = analysis.catchProgress
+                    isCatchReady = analysis.isCatchReady
+                }
+            } finally {
+                bitmap.recycle()
+            }
+
+            if (dialogVisible) {
+                AutoFishStateStore.updateVisionTelemetry(null, null, false, true)
+                return true
+            }
+
+            if (minigameActive && barX != null) {
+                missingMinigameFrames = 0
+                val nowMs = System.currentTimeMillis()
+                val trackedFishX = fishX ?: lastKnownFishX
+                lastKnownFishX = trackedFishX
+
+                if (isCatchReady && (nowMs - lastCatchPullAtMs) >= 420L) {
+                    lastCatchPullAtMs = nowMs
+                    AutoFishStateStore.updateStatus(
+                        BotStatus.HOOKING,
+                        "Bar biru penuh (${(catchProgress * 100).toInt()}%)! Menekan panah bawah ↓"
+                    )
+                    AutoFishStateStore.appendLog(
+                        "Bar progres penuh (${(catchProgress * 100).toInt()}%)! Menekan panah bawah ↓ untuk menangkap ikan",
+                        LogLevel.SUCCESS
+                    )
+                    accessibility.tapRelative(config.hookPoint, durationMs = 70L)
+                    delay(160L)
                     continue
                 }
 
-                var dialogVisible = false
-                var minigameActive = false
-                var fishX: Float? = null
-                var barX: Float? = null
-                var barWidth = 0.14f
-                var catchProgress = 0f
-                var isCatchReady = false
-
-                try {
-                    val dialog = dialogDetector.detect(bitmap, config)
-                    dialogVisible = dialog.isFishCaughtDialogVisible
-                    if (!dialogVisible) {
-                        val analysis = minigameAnalyzer.analyze(bitmap, config)
-                        minigameActive = analysis.isMinigameActive
-                        fishX = analysis.fishX
-                        barX = analysis.barX
-                        barWidth = analysis.barWidth
-                        catchProgress = analysis.catchProgress
-                        isCatchReady = analysis.isCatchReady
+                if (prevFrameTimeMs > 0L && prevFishX != null && fishX != null) {
+                    val dtSec = ((nowMs - prevFrameTimeMs) / 1000f).coerceIn(0.02f, 0.30f)
+                    val instantVel = ((fishX - prevFishX) / dtSec).coerceIn(-2.8f, 2.8f)
+                    smoothedFishVel = if (smoothedFishVel * instantVel < -0.02f) {
+                        instantVel * 0.72f
+                    } else {
+                        smoothedFishVel * 0.40f + instantVel * 0.60f
                     }
-                } finally {
-                    bitmap.recycle()
                 }
+                prevFishX = trackedFishX
+                prevFrameTimeMs = nowMs
 
-                if (dialogVisible) {
-                    accessibility.releaseHold(activeHold)
-                    activeHold = null
-                    activeHoldDir = 0
-                    AutoFishStateStore.updateVisionTelemetry(null, null, false, true)
-                    return true
-                }
+                AutoFishStateStore.updateVisionTelemetry(
+                    fishX = trackedFishX,
+                    barX = barX,
+                    minigameDetected = true,
+                    dialogDetected = false
+                )
 
-                if (minigameActive && barX != null) {
-                    missingMinigameFrames = 0
-                    val nowMs = System.currentTimeMillis()
-                    val trackedFishX = fishX ?: lastKnownFishX
-                    lastKnownFishX = trackedFishX
+                val leadOffset = (smoothedFishVel * 0.045f).coerceIn(-0.06f, 0.06f)
+                val targetFishX = (trackedFishX + leadOffset).coerceIn(0.02f, 0.98f)
+                val delta = targetFishX - barX
+                val absDelta = abs(delta)
+                val deadzone = (barWidth * 0.16f).coerceIn(0.018f, 0.036f)
 
-                    // Press ↓ as soon as the thin cyan progress strip reaches 100%
-                    if (isCatchReady && (nowMs - lastCatchPullAtMs) >= 420L) {
-                        lastCatchPullAtMs = nowMs
-                        accessibility.releaseHold(activeHold)
-                        activeHold = null
-                        activeHoldDir = 0
-                        AutoFishStateStore.updateStatus(
-                            BotStatus.HOOKING,
-                            "Bar biru penuh (${(catchProgress * 100).toInt()}%)! Menekan panah bawah ↓"
-                        )
-                        AutoFishStateStore.appendLog(
-                            "Bar progres penuh (${(catchProgress * 100).toInt()}%)! Menekan panah bawah ↓ untuk menangkap ikan",
-                            LogLevel.SUCCESS
-                        )
-                        accessibility.tapRelative(config.hookPoint, durationMs = 70L)
-                        delay(160L)
-                        continue
-                    }
-
-                    if (prevFrameTimeMs > 0L && prevFishX != null && fishX != null) {
-                        val dtSec = ((nowMs - prevFrameTimeMs) / 1000f).coerceIn(0.02f, 0.30f)
-                        val instantVel = ((fishX - prevFishX) / dtSec).coerceIn(-2.8f, 2.8f)
-                        smoothedFishVel = if (smoothedFishVel * instantVel < -0.02f) {
-                            instantVel * 0.72f
-                        } else {
-                            smoothedFishVel * 0.40f + instantVel * 0.60f
-                        }
-                    }
-                    prevFishX = trackedFishX
-                    prevFrameTimeMs = nowMs
-
-                    AutoFishStateStore.updateVisionTelemetry(
-                        fishX = trackedFishX,
-                        barX = barX,
-                        minigameDetected = true,
-                        dialogDetected = false
-                    )
-
-                    val leadOffset = (smoothedFishVel * 0.045f).coerceIn(-0.06f, 0.06f)
-                    val targetFishX = (trackedFishX + leadOffset).coerceIn(0.02f, 0.98f)
-                    val delta = targetFishX - barX
-
-                    val enterDeadzone = (barWidth * 0.15f).coerceIn(0.018f, 0.034f)
-                    val stopDeadzone = enterDeadzone * 0.60f
-
-                    val desiredDir = when (config.minigameControlMode) {
-                        MinigameControlMode.DUAL_DIRECTION -> {
-                            val threshold = if (activeHoldDir != 0) stopDeadzone else enterDeadzone
-                            when {
-                                delta < -threshold -> -1
-                                delta > threshold -> 1
-                                else -> 0
+                when (config.minigameControlMode) {
+                    MinigameControlMode.DUAL_DIRECTION -> {
+                        if (absDelta > deadzone) {
+                            var pulse = 28f + (absDelta * 420f)
+                            if (delta * smoothedFishVel > 0.025f) {
+                                pulse *= 1.20f // fish moving away
+                            } else if (delta * smoothedFishVel < -0.025f) {
+                                pulse *= 0.72f // fish moving toward box
                             }
-                        }
-                        MinigameControlMode.SINGLE_TAP_HOLD -> {
-                            val threshold = if (activeHoldDir != 0) stopDeadzone else enterDeadzone
-                            val shouldPress = if (config.invertSingleControl) {
-                                delta < -threshold
+                            val pulseMs = pulse.toLong().coerceIn(30L, 125L)
+                            val movingLeft = delta < 0f
+                            val targetPoint = if (movingLeft) {
+                                config.minigameLeftPoint
                             } else {
-                                delta > threshold
+                                config.minigameRightPoint
                             }
-                            if (shouldPress) 1 else 0
-                        }
-                    }
-
-                    // Await the remainder of the current 46ms hold segment before chaining/releasing
-                    if (activeHold != null) {
-                        val segmentOk = activeHold.completion.await()
-                        if (!segmentOk) {
-                            activeHold = null
-                            activeHoldDir = 0
-                        }
-                    }
-
-                    when {
-                        desiredDir == 0 -> {
-                            if (activeHold != null) {
-                                accessibility.releaseHold(activeHold)
-                                activeHold = null
-                                activeHoldDir = 0
-                            }
+                            AutoFishStateStore.updateStatus(
+                                BotStatus.MINIGAME,
+                                "Ikan=${"%.2f".format(trackedFishX)} | Kotak=${"%.2f".format(barX)} -> ${if (movingLeft) "KIRI" else "KANAN"} (${pulseMs}ms)"
+                            )
+                            accessibility.tapRelative(targetPoint, durationMs = pulseMs)
+                            delay(8L)
+                        } else {
                             AutoFishStateStore.updateStatus(
                                 BotStatus.MINIGAME,
                                 "Tepat di ikan! Ikan=${"%.2f".format(trackedFishX)} | Kotak=${"%.2f".format(barX)}"
                             )
-                            delay(18L)
+                            delay(22L)
                         }
+                    }
 
-                        desiredDir == activeHoldDir && activeHold != null -> {
-                            // Zero-gap continuation of the exact same direction!
-                            val targetPoint = pointForDir(config, desiredDir)
-                            activeHold = accessibility.dispatchContinuousHold(activeHold, targetPoint, segmentMs = 46L)
-                            if (activeHold == null) {
-                                activeHoldDir = 0
-                            }
+                    MinigameControlMode.SINGLE_TAP_HOLD -> {
+                        val shouldPress = if (config.invertSingleControl) {
+                            delta < -deadzone
+                        } else {
+                            delta > deadzone
                         }
-
-                        else -> {
-                            // Start holding new direction (release opposite hold first if active)
-                            if (activeHold != null) {
-                                accessibility.releaseHold(activeHold)
-                                activeHold = null
-                                activeHoldDir = 0
-                            }
-                            val targetPoint = pointForDir(config, desiredDir)
-                            val dirLabel = if (config.minigameControlMode == MinigameControlMode.SINGLE_TAP_HOLD) {
-                                "TAHAN"
-                            } else if (desiredDir < 0) {
-                                "KIRI"
-                            } else {
-                                "KANAN"
-                            }
+                        if (shouldPress) {
+                            val pulseMs = (32f + (absDelta * 400f)).toLong().coerceIn(32L, 125L)
                             AutoFishStateStore.updateStatus(
                                 BotStatus.MINIGAME,
-                                "Ikan=${"%.2f".format(trackedFishX)} | Kotak=${"%.2f".format(barX)} -> $dirLabel"
+                                "Kontrol Tunggal (${pulseMs}ms) | Ikan=${"%.2f".format(trackedFishX)}"
                             )
-                            activeHold = accessibility.dispatchContinuousHold(null, targetPoint, segmentMs = 46L)
-                            activeHoldDir = if (activeHold != null) desiredDir else 0
+                            accessibility.tapRelative(config.minigamePrimaryPoint, durationMs = pulseMs)
+                            delay(8L)
+                        } else {
+                            delay(22L)
                         }
                     }
-                } else {
-                    missingMinigameFrames++
-                    if (missingMinigameFrames >= 2 && activeHold != null) {
-                        accessibility.releaseHold(activeHold)
-                        activeHold = null
-                        activeHoldDir = 0
-                    }
-                    if (missingMinigameFrames >= 7) {
-                        AutoFishStateStore.updateStatus(
-                            BotStatus.DIALOG_DETECTED,
-                            "Minigame selesai, menunggu dialog Fish Caught!..."
-                        )
-                        for (probe in 0 until 20) {
-                            delay(180L)
-                            val latestConfig = configProvider()
-                            val probeBmp = captureLatestSafe() ?: continue
-                            val foundDialog = try {
-                                dialogDetector.detect(probeBmp, latestConfig).isFishCaughtDialogVisible
-                            } finally {
-                                probeBmp.recycle()
-                            }
-                            if (foundDialog) {
-                                return true
-                            }
-                        }
-                        return false
-                    }
-                    delay(35L)
                 }
-            }
-            throw CancellationException("Stopped during minigame")
-        } finally {
-            withContext(NonCancellable) {
-                accessibility.releaseHold(activeHold)
+            } else {
+                missingMinigameFrames++
+                if (missingMinigameFrames >= 7) {
+                    AutoFishStateStore.updateStatus(
+                        BotStatus.DIALOG_DETECTED,
+                        "Minigame selesai, menunggu dialog Fish Caught!..."
+                    )
+                    for (probe in 0 until 20) {
+                        delay(180L)
+                        val latestConfig = configProvider()
+                        val probeBmp = captureLatestSafe() ?: continue
+                        val foundDialog = try {
+                            dialogDetector.detect(probeBmp, latestConfig).isFishCaughtDialogVisible
+                        } finally {
+                            probeBmp.recycle()
+                        }
+                        if (foundDialog) {
+                            return true
+                        }
+                    }
+                    return false
+                }
+                delay(35L)
             }
         }
-    }
-
-    private fun pointForDir(config: CalibrationConfig, dir: Int) = when {
-        config.minigameControlMode == MinigameControlMode.SINGLE_TAP_HOLD -> config.minigamePrimaryPoint
-        dir < 0 -> config.minigameLeftPoint
-        else -> config.minigameRightPoint
+        throw CancellationException("Stopped during minigame")
     }
 
     private suspend fun handleFishCaughtDialog(
@@ -594,7 +534,7 @@ class AutoFishEngine(
         AutoFishStateStore.updateVisionTelemetry(null, null, false, false)
     }
 
-    private suspend fun captureFreshSafe(waitIfEmptyMs: Long = 16L): Bitmap? {
+    private suspend fun captureFreshSafe(waitIfEmptyMs: Long = 28L): Bitmap? {
         return try {
             captureManager.captureFreshBitmap(waitIfEmptyMs)
         } catch (_: Exception) {

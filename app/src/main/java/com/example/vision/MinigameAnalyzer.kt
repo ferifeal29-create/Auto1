@@ -209,7 +209,7 @@ class MinigameAnalyzer {
             null
         }
 
-        val isMinigameActive = trackCoverage >= 0.30f && barX != null && barWidth >= 0.03f
+        val isMinigameActive = trackCoverage >= 0.22f && barX != null && barWidth >= 0.03f
         val (catchProgress, rightTailCyanRatio) = if (isMinigameActive) {
             measureCatchProgress(
                 bitmap = bitmap,
