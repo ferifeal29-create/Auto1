@@ -285,6 +285,15 @@ class ScreenCaptureManager(private val context: Context) {
 
     @Suppress("DEPRECATION")
     private fun readRawDisplayMetrics(): Triple<Int, Int, Int> {
+        val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        val display = dm.getDisplay(android.view.Display.DEFAULT_DISPLAY)
+        if (display != null) {
+            val metrics = DisplayMetrics()
+            display.getRealMetrics(metrics)
+            if (metrics.widthPixels > 0 && metrics.heightPixels > 0) {
+                return Triple(metrics.widthPixels, metrics.heightPixels, metrics.densityDpi)
+            }
+        }
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             val bounds = windowManager.currentWindowMetrics.bounds
             val density = context.resources.displayMetrics.densityDpi

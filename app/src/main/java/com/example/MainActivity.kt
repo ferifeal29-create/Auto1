@@ -253,6 +253,7 @@ fun AutoFishApp(
                             onUpdateMinigameMode = viewModel::updateMinigameMode,
                             onUpdatePostCatchAction = viewModel::updatePostCatchAction,
                             onUpdateUseBaitSelection = viewModel::updateUseBaitSelection,
+                            onUpdateAutoDetectWaterBlock = viewModel::updateAutoDetectWaterBlock,
                             onUpdateInvertSingle = viewModel::updateInvertSingleControl,
                             onUpdateCastDelay = viewModel::updateCastDelay,
                             onUpdateRecastDelay = viewModel::updateRecastDelay,

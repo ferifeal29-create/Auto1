@@ -6,6 +6,7 @@ import com.example.model.CalibrationConfig
 import com.example.vision.BiteDetector
 import com.example.vision.DialogDetector
 import com.example.vision.MinigameAnalyzer
+import com.example.vision.WaterBlockDetector
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
@@ -22,6 +23,7 @@ class VisionAnalysisTest {
     private val biteDetector = BiteDetector()
     private val minigameAnalyzer = MinigameAnalyzer()
     private val dialogDetector = DialogDetector()
+    private val waterBlockDetector = WaterBlockDetector()
 
     @Test
     fun `minigame analyzer detects fish, green bar, and half vs full cyan catch progress`() {
@@ -181,6 +183,57 @@ class VisionAnalysisTest {
         // Verify closed even on dark night background
         fillRect(bitmap, 0, 0, width, height, Color.rgb(18, 42, 92))
         assertTrue("Expected dialog verified closed on night sky", dialogDetector.isDialogClosed(bitmap, config))
+        bitmap.recycle()
+    }
+
+    @Test
+    fun `water block detector locates water on left or right of character and rejects cobalt sky`() {
+        val width = 1000
+        val height = 450
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+
+        // Fill with cobalt daytime sky
+        fillRect(bitmap, 0, 0, width, height, Color.rgb(35, 110, 240))
+        val skyOnly = waterBlockDetector.detectWaterNearCharacter(bitmap)
+        assertTrue("Pure sky should not detect water, got $skyOnly", skyOnly.detectedPoint == null)
+
+        // Place aqua water block on the RIGHT side of character (x=0.60..0.78, y=0.45..0.72)
+        fillRect(bitmap, 600, 200, 780, 325, Color.rgb(45, 175, 210))
+        val rightWater = waterBlockDetector.detectWaterNearCharacter(bitmap)
+        assertNotNull("Expected right water detected", rightWater.detectedPoint)
+        assertTrue("Detected water should be on right (>0.55), got ${rightWater.detectedPoint}", rightWater.detectedPoint!!.x > 0.55f)
+
+        // Clear back to sky, place water block on the LEFT side of character (x=0.22..0.40, y=0.45..0.72)
+        fillRect(bitmap, 0, 0, width, height, Color.rgb(35, 110, 240))
+        fillRect(bitmap, 220, 200, 400, 325, Color.rgb(45, 175, 210))
+        val leftWater = waterBlockDetector.detectWaterNearCharacter(bitmap)
+        assertNotNull("Expected left water detected", leftWater.detectedPoint)
+        assertTrue("Detected water should be on left (<0.45), got ${leftWater.detectedPoint}", leftWater.detectedPoint!!.x < 0.45f)
+
+        bitmap.recycle()
+    }
+
+    @Test
+    fun `water block detector identifies active orange bait selection border`() {
+        val width = 1000
+        val height = 450
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        fillRect(bitmap, 0, 0, width, height, Color.rgb(30, 80, 160))
+
+        val baitPt = config.baitPoint
+        assertFalse("Empty dark slot should not report selected", waterBlockDetector.isBaitSlotSelected(bitmap, baitPt))
+
+        val cx = (baitPt.x * width).toInt()
+        val cy = (baitPt.y * height).toInt()
+        val rx = (width * 0.025f).toInt()
+        val ry = (height * 0.045f).toInt()
+        val orange = Color.rgb(245, 155, 25)
+        fillRect(bitmap, cx - rx - 2, cy - ry - 2, cx + rx + 2, cy - ry + 3, orange)
+        fillRect(bitmap, cx - rx - 2, cy + ry - 3, cx + rx + 2, cy + ry + 2, orange)
+        fillRect(bitmap, cx - rx - 2, cy - ry - 2, cx - rx + 3, cy + ry + 2, orange)
+        fillRect(bitmap, cx + rx - 3, cy - ry - 2, cx + rx + 2, cy + ry + 2, orange)
+
+        assertTrue("Orange border around bait slot should report selected", waterBlockDetector.isBaitSlotSelected(bitmap, baitPt))
         bitmap.recycle()
     }
 

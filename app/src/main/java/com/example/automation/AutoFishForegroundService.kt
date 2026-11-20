@@ -21,6 +21,7 @@ import com.example.model.CalibrationConfig
 import com.example.vision.BiteDetector
 import com.example.vision.DialogDetector
 import com.example.vision.MinigameAnalyzer
+import com.example.vision.WaterBlockDetector
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -157,6 +158,7 @@ class AutoFishForegroundService : Service() {
             biteDetector = BiteDetector(),
             minigameAnalyzer = MinigameAnalyzer(),
             dialogDetector = DialogDetector(),
+            waterBlockDetector = WaterBlockDetector(),
             calibrationRepository = calibrationRepository,
             gestureProvider = { AutoFishAccessibilityService.instance }
         )

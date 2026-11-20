@@ -53,6 +53,7 @@ class CalibrationRepository(private val context: Context) {
         val CONTROL_MODE = stringPreferencesKey("control_mode")
         val POST_CATCH_ACTION = stringPreferencesKey("post_catch_action")
         val USE_BAIT_SELECTION = booleanPreferencesKey("use_bait_selection")
+        val AUTO_DETECT_WATER = booleanPreferencesKey("auto_detect_water")
         val INVERT_SINGLE = booleanPreferencesKey("invert_single")
         val CAST_DELAY_MS = longPreferencesKey("cast_delay_ms")
         val RECAST_DELAY_MS = longPreferencesKey("recast_delay_ms")
@@ -127,6 +128,7 @@ class CalibrationRepository(private val context: Context) {
             minigameControlMode = mode,
             postCatchAction = postAction,
             useBaitSelection = prefs[Keys.USE_BAIT_SELECTION] ?: default.useBaitSelection,
+            autoDetectWaterBlock = prefs[Keys.AUTO_DETECT_WATER] ?: default.autoDetectWaterBlock,
             invertSingleControl = prefs[Keys.INVERT_SINGLE] ?: default.invertSingleControl,
             castDelayMs = prefs[Keys.CAST_DELAY_MS] ?: default.castDelayMs,
             recastDelayMs = prefs[Keys.RECAST_DELAY_MS] ?: default.recastDelayMs,
@@ -168,6 +170,7 @@ class CalibrationRepository(private val context: Context) {
             prefs[Keys.CONTROL_MODE] = config.minigameControlMode.name
             prefs[Keys.POST_CATCH_ACTION] = config.postCatchAction.name
             prefs[Keys.USE_BAIT_SELECTION] = config.useBaitSelection
+            prefs[Keys.AUTO_DETECT_WATER] = config.autoDetectWaterBlock
             prefs[Keys.INVERT_SINGLE] = config.invertSingleControl
             prefs[Keys.CAST_DELAY_MS] = config.castDelayMs
             prefs[Keys.RECAST_DELAY_MS] = config.recastDelayMs

@@ -86,6 +86,7 @@ fun CalibrationScreen(
     onUpdateMinigameMode: (MinigameControlMode) -> Unit,
     onUpdatePostCatchAction: (PostCatchAction) -> Unit,
     onUpdateUseBaitSelection: (Boolean) -> Unit,
+    onUpdateAutoDetectWaterBlock: (Boolean) -> Unit,
     onUpdateInvertSingle: (Boolean) -> Unit,
     onUpdateCastDelay: (Long) -> Unit,
     onUpdateRecastDelay: (Long) -> Unit,
@@ -172,6 +173,7 @@ fun CalibrationScreen(
                     onUpdateMinigameMode = onUpdateMinigameMode,
                     onUpdatePostCatchAction = onUpdatePostCatchAction,
                     onUpdateUseBaitSelection = onUpdateUseBaitSelection,
+                    onUpdateAutoDetectWaterBlock = onUpdateAutoDetectWaterBlock,
                     onUpdateInvertSingle = onUpdateInvertSingle,
                     onUpdateCastDelay = onUpdateCastDelay,
                     onUpdateRecastDelay = onUpdateRecastDelay
@@ -566,6 +568,7 @@ private fun MinigameAndActionSettingsCard(
     onUpdateMinigameMode: (MinigameControlMode) -> Unit,
     onUpdatePostCatchAction: (PostCatchAction) -> Unit,
     onUpdateUseBaitSelection: (Boolean) -> Unit,
+    onUpdateAutoDetectWaterBlock: (Boolean) -> Unit,
     onUpdateInvertSingle: (Boolean) -> Unit,
     onUpdateCastDelay: (Long) -> Unit,
     onUpdateRecastDelay: (Long) -> Unit
@@ -606,6 +609,30 @@ private fun MinigameAndActionSettingsCard(
                 Switch(
                     checked = config.useBaitSelection,
                     onCheckedChange = onUpdateUseBaitSelection
+                )
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Deteksi Otomatis Blok Air",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Text(
+                        text = "Otomatis mencari blok air di kiri/kanan karakter saat mulai memancing",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = config.autoDetectWaterBlock,
+                    onCheckedChange = onUpdateAutoDetectWaterBlock,
+                    modifier = Modifier.testTag("switch_auto_detect_water")
                 )
             }
 

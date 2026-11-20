@@ -8,9 +8,11 @@ import com.example.model.CalibrationConfig
 import com.example.model.LogLevel
 import com.example.model.MinigameControlMode
 import com.example.model.PostCatchAction
+import com.example.model.RelativePoint
 import com.example.vision.BiteDetector
 import com.example.vision.DialogDetector
 import com.example.vision.MinigameAnalyzer
+import com.example.vision.WaterBlockDetector
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -28,6 +30,7 @@ class AutoFishEngine(
     private val biteDetector: BiteDetector,
     private val minigameAnalyzer: MinigameAnalyzer,
     private val dialogDetector: DialogDetector,
+    private val waterBlockDetector: WaterBlockDetector,
     private val calibrationRepository: CalibrationRepository,
     private val gestureProvider: () -> AutoFishAccessibilityService?
 ) {
@@ -40,6 +43,8 @@ class AutoFishEngine(
             )
             delay(1000L)
         }
+
+        var consecutiveCastTimeouts = 0
 
         while (currentCoroutineContext().isActive) {
             val config = configProvider()
@@ -68,10 +73,12 @@ class AutoFishEngine(
 
             when (preOutcome) {
                 PreCheckOutcome.DIALOG_OPEN -> {
+                    consecutiveCastTimeouts = 0
                     handleFishCaughtDialog(accessibility, configProvider, countNewCatch = true)
                     continue
                 }
                 PreCheckOutcome.MINIGAME_ACTIVE -> {
+                    consecutiveCastTimeouts = 0
                     val caught = playMinigame(accessibility, configProvider)
                     if (caught) {
                         handleFishCaughtDialog(accessibility, configProvider, countNewCatch = true)
@@ -79,6 +86,7 @@ class AutoFishEngine(
                     continue
                 }
                 PreCheckOutcome.BITE_ACTIVE -> {
+                    consecutiveCastTimeouts = 0
                     val hooked = hookAndAwaitMinigame(accessibility, configProvider)
                     if (hooked == WaitOutcome.MINIGAME_STARTED) {
                         val caught = playMinigame(accessibility, configProvider)
@@ -93,26 +101,40 @@ class AutoFishEngine(
                 PreCheckOutcome.READY_TO_CAST -> Unit
             }
 
-            // 2. FASE 1: Select Worm Bait Slot (if enabled) -> Tap Water Block to Cast
-            if (config.useBaitSelection) {
-                AutoFishStateStore.updateStatus(
-                    BotStatus.CASTING,
-                    "Memilih Umpan Cacing (${formatCoords(config.baitPoint.x, config.baitPoint.y)})"
-                )
-                val baitTapped = accessibility.tapRelative(config.baitPoint, durationMs = 55L)
-                if (!baitTapped) {
-                    AutoFishStateStore.appendLog("Gagal mengetuk slot umpan cacing, mencoba lagi", LogLevel.WARNING)
-                    delay(500L)
-                    continue
+            // 2. FASE 1: Check/Select Worm Bait Slot -> Auto-Detect Adjacent Water Block -> Cast
+            var preCastBmp = captureFreshSafe(waitIfEmptyMs = 24L) ?: captureLatestSafe()
+            val castTarget: RelativePoint
+            try {
+                if (config.useBaitSelection) {
+                    val alreadySelected = preCastBmp != null &&
+                        waterBlockDetector.isBaitSlotSelected(preCastBmp, config.baitPoint)
+                    if (alreadySelected) {
+                        AutoFishStateStore.appendLog("Slot umpan cacing sudah terpilih (bingkai oranye aktif)", LogLevel.INFO)
+                    } else {
+                        AutoFishStateStore.updateStatus(
+                            BotStatus.CASTING,
+                            "Memilih Umpan Cacing (${formatCoords(config.baitPoint.x, config.baitPoint.y)})"
+                        )
+                        val baitTapped = accessibility.tapRelative(config.baitPoint, durationMs = 55L)
+                        if (!baitTapped) {
+                            AutoFishStateStore.appendLog("Gagal mengetuk slot umpan cacing, mencoba lagi", LogLevel.WARNING)
+                            delay(500L)
+                            continue
+                        }
+                        delay(260L)
+                    }
                 }
-                delay(240L)
+
+                castTarget = resolveCastPoint(config, preCastBmp, consecutiveCastTimeouts)
+            } finally {
+                preCastBmp?.recycle()
             }
 
             AutoFishStateStore.updateStatus(
                 BotStatus.CASTING,
-                "Melempar kail ke Blok Air (${formatCoords(config.castPoint.x, config.castPoint.y)})"
+                "Melempar kail ke Blok Air (${formatCoords(castTarget.x, castTarget.y)})"
             )
-            val castTapped = accessibility.tapRelative(config.castPoint, durationMs = 60L)
+            val castTapped = accessibility.tapRelative(castTarget, durationMs = 65L)
             if (!castTapped) {
                 AutoFishStateStore.appendLog("Gagal mengirim gesture Cast ke blok air, mencoba lagi", LogLevel.WARNING)
                 delay(600L)
@@ -124,6 +146,7 @@ class AutoFishEngine(
             val waitOutcome = waitForBiteAndHook(accessibility, configProvider)
             when (waitOutcome) {
                 WaitOutcome.MINIGAME_STARTED -> {
+                    consecutiveCastTimeouts = 0
                     AutoFishStateStore.appendLog("Minigame Catch The Fish dimulai!", LogLevel.INFO)
                     val caught = playMinigame(accessibility, configProvider)
                     if (caught) {
@@ -133,10 +156,12 @@ class AutoFishEngine(
                     }
                 }
                 WaitOutcome.DIALOG_ALREADY_OPEN -> {
+                    consecutiveCastTimeouts = 0
                     handleFishCaughtDialog(accessibility, configProvider, countNewCatch = true)
                 }
                 WaitOutcome.TIMED_OUT -> {
-                    AutoFishStateStore.appendLog("Bite timeout tercapai, melakukan cast ulang", LogLevel.WARNING)
+                    consecutiveCastTimeouts++
+                    AutoFishStateStore.appendLog("Bite timeout tercapai, mencoba cast ulang ke blok air", LogLevel.WARNING)
                 }
             }
 
@@ -548,6 +573,52 @@ class AutoFishEngine(
         } catch (_: Exception) {
             null
         }
+    }
+
+    private fun resolveCastPoint(
+        config: CalibrationConfig,
+        bitmap: Bitmap?,
+        consecutiveTimeouts: Int
+    ): RelativePoint {
+        if (!config.autoDetectWaterBlock || bitmap == null) {
+            return config.castPoint
+        }
+
+        val detection = waterBlockDetector.detectWaterNearCharacter(bitmap)
+        val candidates = buildList {
+            if (detection.detectedPoint != null) {
+                add(detection.detectedPoint)
+                detection.fallbackAlternatePoint?.let { add(it) }
+                add(config.castPoint)
+            } else {
+                add(config.castPoint)
+                add(RelativePoint(0.32f, 0.56f))
+                add(RelativePoint(0.68f, 0.56f))
+            }
+        }.distinctBy { "${(it.x * 100).toInt()},${(it.y * 100).toInt()}" }
+
+        val chosen = candidates[consecutiveTimeouts % candidates.size]
+        when {
+            detection.detectedPoint != null && consecutiveTimeouts == 0 -> {
+                AutoFishStateStore.appendLog(
+                    "Blok air terdeteksi otomatis di (${formatCoords(chosen.x, chosen.y)}) • skor ${(detection.confidence * 100).toInt()}%",
+                    LogLevel.INFO
+                )
+            }
+            consecutiveTimeouts > 0 -> {
+                AutoFishStateStore.appendLog(
+                    "Mencoba titik blok air alternatif (${formatCoords(chosen.x, chosen.y)})",
+                    LogLevel.WARNING
+                )
+            }
+            else -> {
+                AutoFishStateStore.appendLog(
+                    "Blok air tidak terdeteksi jelas, memakai titik kalibrasi (${formatCoords(chosen.x, chosen.y)})",
+                    LogLevel.INFO
+                )
+            }
+        }
+        return chosen
     }
 
     private fun formatCoords(x: Float, y: Float): String =

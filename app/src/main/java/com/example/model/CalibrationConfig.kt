@@ -66,6 +66,7 @@ data class CalibrationConfig(
     val minigameControlMode: MinigameControlMode = MinigameControlMode.DUAL_DIRECTION,
     val postCatchAction: PostCatchAction = PostCatchAction.SELL,
     val useBaitSelection: Boolean = true,
+    val autoDetectWaterBlock: Boolean = true,
     val invertSingleControl: Boolean = false,
     val castDelayMs: Long = 1000L,
     val recastDelayMs: Long = 900L,

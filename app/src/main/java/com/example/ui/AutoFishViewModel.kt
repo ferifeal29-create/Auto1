@@ -97,6 +97,10 @@ class AutoFishViewModel(application: Application) : AndroidViewModel(application
         saveConfig(calibrationConfig.value.copy(useBaitSelection = enabled))
     }
 
+    fun updateAutoDetectWaterBlock(enabled: Boolean) {
+        saveConfig(calibrationConfig.value.copy(autoDetectWaterBlock = enabled))
+    }
+
     fun updateInvertSingleControl(invert: Boolean) {
         saveConfig(calibrationConfig.value.copy(invertSingleControl = invert))
     }
