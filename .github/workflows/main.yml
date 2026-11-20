@@ -1,0 +1,49 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.3.1
+
+      - name: Siapkan proyek
+        run: |
+          if [ -f settings.gradle.kts ]; then
+            echo "PROYEK=." >> $GITHUB_ENV
+          else
+            ZIP=$(ls *.zip | head -n 1)
+            mkdir -p proyek
+            unzip -q "$ZIP" -d proyek
+            echo "PROYEK=proyek" >> $GITHUB_ENV
+          fi
+
+      - name: Siapkan debug.keystore
+        run: |
+          if [ ! -f "$PROYEK/debug.keystore" ]; then
+            keytool -genkeypair -keystore "$PROYEK/debug.keystore" \
+              -storepass android -keypass android -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Build APK debug
+        working-directory: ${{ env.PROYEK }}
+        run: gradle assembleDebug --no-daemon --no-parallel --no-configuration-cache -Pkotlin.compiler.execution.strategy=daemon
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Autoo-debug-apk
+          path: ${{ env.PROYEK }}/app/build/outputs/apk/debug/*.apk

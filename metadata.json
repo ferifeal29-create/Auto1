@@ -1,0 +1,6 @@
+{
+  "name": "AutoFish",
+  "description": "Gridmere auto-fishing automation app using Accessibility Service, MediaProjection visual analysis, Foreground Service, and DataStore calibration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

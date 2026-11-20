@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">AutoFish</string>
+    <string name="accessibility_service_label">AutoFish Touch Controller</string>
+    <string name="accessibility_service_description">AutoFish uses Accessibility gestures only while automation is active to tap Cast, control the Gridmere fishing minigame, and tap Sell/Keep based on your calibrated coordinates.</string>
+    <string name="notification_channel_name">AutoFish Automation</string>
+    <string name="notification_channel_desc">Shows live fishing automation status and quick stop control</string>
+</resources>
