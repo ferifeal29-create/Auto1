@@ -19,13 +19,13 @@ data class MinigameAnalysisResult(
 )
 
 /**
- * Fast Bitmap-based visual analyzer for Gridmere's "CATCH THE FISH" minigame bar.
- * Detects:
- * 1. Movable box in BOTH states (bright green when fish inside, yellow when fish outside)
- * 2. Fish silhouette inside or outside the box
- * 3. Thin cyan catch-progress bar right underneath the track (triggers pull ↓ when full)
+ * High-speed Bitmap-based visual analyzer for Gridmere's "CATCH THE FISH" minigame bar.
+ * Reuses internal pixel buffers to minimize GC latency during 20Hz+ closed-loop tracking.
  */
 class MinigameAnalyzer {
+
+    private var trackPixelBuffer = IntArray(0)
+    private var stripPixelBuffer = IntArray(0)
 
     fun analyze(bitmap: Bitmap, config: CalibrationConfig): MinigameAnalysisResult {
         val width = bitmap.width
@@ -37,7 +37,6 @@ class MinigameAnalyzer {
         val rect = config.minigameBarRegion.clamped()
         val xStart = (rect.left * width).toInt().coerceIn(0, width - 2)
         val xEnd = (rect.right * width).toInt().coerceIn(xStart + 1, width - 1)
-        // Focus on the horizontal water track below the "CATCH THE FISH" header
         val trackTop = (rect.top * height + (rect.bottom - rect.top) * height * 0.32f)
             .toInt()
             .coerceIn(0, height - 2)
@@ -51,7 +50,11 @@ class MinigameAnalyzer {
             return emptyResult()
         }
 
-        val pixels = IntArray(regionWidth * regionHeight)
+        val requiredTrackSize = regionWidth * regionHeight
+        if (trackPixelBuffer.size < requiredTrackSize) {
+            trackPixelBuffer = IntArray(requiredTrackSize)
+        }
+        val pixels = trackPixelBuffer
         bitmap.getPixels(pixels, 0, regionWidth, xStart, trackTop, regionWidth, regionHeight)
 
         val colStep = max(1, regionWidth / 110)
@@ -85,8 +88,8 @@ class MinigameAnalyzer {
                 val isGreenBox = g > 130 && g > r + 25 && g > b + 20
                 val isYellowBox = g > 135 && r > 125 && g > b + 45 && abs(r - g) <= 60
                 val isBoxPixel = isGreenBox || isYellowBox
-                val isDarkFish = r < 72 && g < 95 && b in 40..155 && (r + g) < 155
-                val isBrightOverlapFish = g > 165 && r in 40..145 && b < 100 && (g - b) > 80
+                val isDarkFish = r < 78 && g < 100 && b in 35..160 && (r + g) < 165
+                val isBrightOverlapFish = g > 165 && r < 145 && b < 105 && (g - b) > 85
 
                 if (isBoxPixel) boxCount++
                 if (isDarkFish) darkFishCount++
@@ -117,7 +120,7 @@ class MinigameAnalyzer {
 
         val trackCoverage = trackMatchingSamples.toFloat() / totalSamples
 
-        // Group contiguous columns that belong to the green/yellow outline box
+        // Group contiguous columns belonging to the green/yellow movable box
         var bestStart = -1
         var bestEnd = -1
         var bestEnergy = 0f
@@ -173,7 +176,7 @@ class MinigameAnalyzer {
         var fishTotalWeight = 0f
         for (i in 0 until colIndex) {
             val weight = darkFishScores[i]
-            if (weight >= 0.13f) {
+            if (weight >= 0.10f) {
                 val normX = i.toFloat() / max(1, colIndex - 1)
                 fishWeightedSum += normX * weight
                 fishTotalWeight += weight
@@ -181,7 +184,7 @@ class MinigameAnalyzer {
         }
 
         var isFishInsideBar = false
-        val fishX: Float? = if (fishTotalWeight >= 0.18f) {
+        val fishX: Float? = if (fishTotalWeight >= 0.12f) {
             (fishWeightedSum / fishTotalWeight).coerceIn(0f, 1f)
         } else if (barX != null && bestStart >= 0) {
             var overlapWeightedSum = 0f
@@ -211,7 +214,6 @@ class MinigameAnalyzer {
             measureCatchProgress(
                 bitmap = bitmap,
                 xStart = xStart,
-                xEnd = xEnd,
                 colStep = colStep,
                 colCount = colIndex,
                 trackColScores = trackColScores,
@@ -237,14 +239,9 @@ class MinigameAnalyzer {
         )
     }
 
-    /**
-     * Scans the thin horizontal progress strip directly underneath the main blue track.
-     * Returns (overallFillRatio, rightTailFillRatio).
-     */
     private fun measureCatchProgress(
         bitmap: Bitmap,
         xStart: Int,
-        xEnd: Int,
         colStep: Int,
         colCount: Int,
         trackColScores: FloatArray,
@@ -268,7 +265,11 @@ class MinigameAnalyzer {
         val stripBottom = (trackBottom + max(10, (regionHeight * 0.65f).toInt())).coerceIn(stripTop + 1, bitmap.height - 1)
         val stripH = stripBottom - stripTop + 1
 
-        val stripPixels = IntArray(barW * stripH)
+        val requiredStripSize = barW * stripH
+        if (stripPixelBuffer.size < requiredStripSize) {
+            stripPixelBuffer = IntArray(requiredStripSize)
+        }
+        val stripPixels = stripPixelBuffer
         bitmap.getPixels(stripPixels, 0, barW, innerLeftX, stripTop, barW, stripH)
 
         val sampleStepX = max(1, barW / 64)
@@ -308,9 +309,7 @@ class MinigameAnalyzer {
             }
 
             if (rowTotal > 0) {
-                // Progress strip has high density of either bright cyan fill or dark unfilled track
                 val stripLikeness = (cyanCount + darkTrackCount).toFloat() / rowTotal
-                // Prefer rows that actually look like the progress bar (higher cyan + dark contrast)
                 val rowScore = stripLikeness + (cyanCount.toFloat() / rowTotal) * 0.25f
                 if (stripLikeness >= 0.60f && rowScore > bestRowScore) {
                     bestRowScore = rowScore

@@ -12,6 +12,7 @@ import android.util.DisplayMetrics
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import com.example.model.RelativePoint
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -20,7 +21,7 @@ import kotlin.coroutines.resume
 
 /**
  * Accessibility Service responsible for dispatching calibrated touch gestures
- * (Cast, Minigame controls, Sell/Keep) into Gridmere.
+ * (Cast, continuous zero-gap Minigame holds, Hook, Sell/Keep) into Gridmere.
  */
 class AutoFishAccessibilityService : AccessibilityService() {
 
@@ -55,17 +56,10 @@ class AutoFishAccessibilityService : AccessibilityService() {
     }
 
     suspend fun tapRelative(point: RelativePoint, durationMs: Long = 55L): Boolean {
-        val clamped = point.clamped()
-        val (screenW, screenH) = currentScreenSize()
-        if (screenW <= 0 || screenH <= 0) return false
-
-        val px = (clamped.x * screenW).coerceIn(1f, (screenW - 1).toFloat())
-        val py = (clamped.y * screenH).coerceIn(1f, (screenH - 1).toFloat())
+        val (px, py) = toScreenPixels(point) ?: return false
         val safeDuration = durationMs.coerceIn(25L, 800L)
 
-        val path = Path().apply {
-            moveTo(px, py)
-        }
+        val path = Path().apply { moveTo(px, py) }
         val stroke = GestureDescription.StrokeDescription(path, 0L, safeDuration)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
 
@@ -89,6 +83,103 @@ class AutoFishAccessibilityService : AccessibilityService() {
         }
     }
 
+    /**
+     * Begins or continues a zero-gap continuous touch hold at [point] for [segmentMs]
+     * using StrokeDescription.continueStroke on API 26+.
+     * Returns an active [HoldHandle] whose [completion] completes when [segmentMs] finishes.
+     */
+    fun dispatchContinuousHold(
+        previousHandle: HoldHandle?,
+        point: RelativePoint,
+        segmentMs: Long = 48L
+    ): HoldHandle? {
+        val (px, py) = toScreenPixels(point) ?: return null
+        val safeDuration = segmentMs.coerceIn(25L, 200L)
+        val path = Path().apply { moveTo(px, py) }
+
+        val stroke = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            if (previousHandle != null) {
+                previousHandle.stroke.continueStroke(path, 0L, safeDuration, true)
+            } else {
+                GestureDescription.StrokeDescription(path, 0L, safeDuration, true)
+            }
+        } else {
+            GestureDescription.StrokeDescription(path, 0L, safeDuration)
+        }
+
+        val deferred = CompletableDeferred<Boolean>()
+        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+        val dispatched = dispatchGesture(
+            gesture,
+            object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    deferred.complete(true)
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    deferred.complete(false)
+                }
+            },
+            null
+        )
+
+        if (!dispatched) {
+            deferred.complete(false)
+            return null
+        }
+
+        return HoldHandle(
+            stroke = stroke,
+            lastPoint = point,
+            completion = deferred,
+            canContinue = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+        )
+    }
+
+    /**
+     * Smoothly lifts the finger from an ongoing [HoldHandle].
+     */
+    suspend fun releaseHold(handle: HoldHandle?): Boolean {
+        if (handle == null) return true
+        // Wait for the currently running segment to finish before chaining the release stroke
+        val segmentOk = handle.completion.await()
+        if (!handle.canContinue || !segmentOk) {
+            return true
+        }
+        val (px, py) = toScreenPixels(handle.lastPoint) ?: return false
+        val path = Path().apply { moveTo(px, py) }
+        val endStroke = handle.stroke.continueStroke(path, 0L, 12L, false)
+        val gesture = GestureDescription.Builder().addStroke(endStroke).build()
+
+        return suspendCancellableCoroutine { continuation ->
+            val dispatched = dispatchGesture(
+                gesture,
+                object : GestureResultCallback() {
+                    override fun onCompleted(gestureDescription: GestureDescription?) {
+                        if (continuation.isActive) continuation.resume(true)
+                    }
+
+                    override fun onCancelled(gestureDescription: GestureDescription?) {
+                        if (continuation.isActive) continuation.resume(false)
+                    }
+                },
+                null
+            )
+            if (!dispatched && continuation.isActive) {
+                continuation.resume(false)
+            }
+        }
+    }
+
+    private fun toScreenPixels(point: RelativePoint): Pair<Float, Float>? {
+        val clamped = point.clamped()
+        val (screenW, screenH) = currentScreenSize()
+        if (screenW <= 0 || screenH <= 0) return null
+        val px = (clamped.x * screenW).coerceIn(1f, (screenW - 1).toFloat())
+        val py = (clamped.y * screenH).coerceIn(1f, (screenH - 1).toFloat())
+        return px to py
+    }
+
     @Suppress("DEPRECATION")
     private fun currentScreenSize(): Pair<Int, Int> {
         val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -101,6 +192,13 @@ class AutoFishAccessibilityService : AccessibilityService() {
             metrics.widthPixels to metrics.heightPixels
         }
     }
+
+    data class HoldHandle(
+        val stroke: GestureDescription.StrokeDescription,
+        val lastPoint: RelativePoint,
+        val completion: CompletableDeferred<Boolean>,
+        val canContinue: Boolean
+    )
 
     companion object {
         @Volatile

@@ -7,6 +7,7 @@ import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.Image
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
@@ -16,6 +17,7 @@ import android.os.HandlerThread
 import android.util.DisplayMetrics
 import android.view.WindowManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import kotlin.math.max
@@ -24,7 +26,9 @@ import kotlin.math.max
  * Manages MediaProjection, VirtualDisplay, and ImageReader to capture live screen Bitmaps.
  * Automatically detects orientation switches (e.g., portrait dashboard -> landscape Gridmere)
  * and resizes the VirtualDisplay and ImageReader accordingly.
- * Retains the latest valid frame so static screens never drop verification checks.
+ *
+ * - [captureFreshBitmap]: returns ONLY a newly rendered frame (never stale cached data), ideal for fast minigame tracking.
+ * - [captureLatestBitmap]: falls back to the latest cached frame when the screen is static (ideal for dialog verification).
  */
 class ScreenCaptureManager(private val context: Context) {
 
@@ -84,24 +88,51 @@ class ScreenCaptureManager(private val context: Context) {
         return true
     }
 
+    /**
+     * Captures ONLY a freshly rendered frame from ImageReader (never returns stale cached bitmaps).
+     * Waits briefly up to [waitIfEmptyMs] if no new frame is immediately queued yet.
+     */
+    suspend fun captureFreshBitmap(waitIfEmptyMs: Long = 16L): Bitmap? = withContext(Dispatchers.Default) {
+        val projection = mediaProjection ?: return@withContext null
+        ensureOrientationMatchesDisplay(projection)
+
+        val reader = imageReader ?: return@withContext null
+        var image = acquireLatestSafe(reader)
+        if (image == null && waitIfEmptyMs > 0L) {
+            delay(waitIfEmptyMs)
+            image = acquireLatestSafe(reader)
+        }
+        if (image == null) {
+            return@withContext null
+        }
+        return@withContext imageToBitmap(image, cacheCopy = false)
+    }
+
+    /**
+     * Captures the latest frame, falling back to a copy of the last captured frame if the
+     * display is currently static and no new Image has arrived.
+     */
     suspend fun captureLatestBitmap(): Bitmap? = withContext(Dispatchers.Default) {
         val projection = mediaProjection ?: return@withContext null
         ensureOrientationMatchesDisplay(projection)
 
         val reader = imageReader ?: return@withContext null
-        val image = try {
+        val image = acquireLatestSafe(reader) ?: return@withContext copyCachedFrame()
+        return@withContext imageToBitmap(image, cacheCopy = true) ?: copyCachedFrame()
+    }
+
+    private fun acquireLatestSafe(reader: ImageReader): Image? {
+        return try {
             reader.acquireLatestImage()
         } catch (_: IllegalStateException) {
             null
         }
+    }
 
-        if (image == null) {
-            return@withContext copyCachedFrame()
-        }
-
+    private fun imageToBitmap(image: Image, cacheCopy: Boolean): Bitmap? {
         try {
             val planes = image.planes
-            if (planes.isEmpty()) return@withContext copyCachedFrame()
+            if (planes.isEmpty()) return null
             val plane = planes[0]
             val buffer: ByteBuffer = plane.buffer
             val pixelStride = plane.pixelStride
@@ -124,10 +155,12 @@ class ScreenCaptureManager(private val context: Context) {
                 cropped
             }
 
-            updateCachedFrame(fresh)
-            return@withContext fresh
+            if (cacheCopy) {
+                updateCachedFrame(fresh)
+            }
+            return fresh
         } catch (_: Exception) {
-            return@withContext copyCachedFrame()
+            return null
         } finally {
             image.close()
         }
@@ -224,7 +257,7 @@ class ScreenCaptureManager(private val context: Context) {
         density: Int,
         looperHandler: Handler
     ) {
-        val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2)
+        val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
         imageReader = reader
         virtualDisplay = projection.createVirtualDisplay(
             "AutoFishCapture",
@@ -240,7 +273,6 @@ class ScreenCaptureManager(private val context: Context) {
 
     private fun readScaledDisplayMetrics(): Triple<Int, Int, Int> {
         val (rawWidth, rawHeight, density) = readRawDisplayMetrics()
-        // Downscale high-res displays (e.g. 2400x1080 -> ~1200x540) to keep pixel analysis sub-2ms
         val maxSide = max(rawWidth, rawHeight)
         val scale = if (maxSide > 1280) 1280f / maxSide else 1f
         val scaledW = max(320, (rawWidth * scale).toInt() and 0xFFFFFFFE.toInt())
