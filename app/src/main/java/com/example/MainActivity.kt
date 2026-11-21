@@ -22,11 +22,11 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.MenuBook
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.filled.Dashboard
-import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.outlined.Dashboard
-import androidx.compose.material.icons.outlined.MenuBook
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
@@ -273,5 +273,5 @@ fun AutoFishApp(
 private fun tabIcon(tab: AutoFishTab, selected: Boolean) = when (tab) {
     AutoFishTab.DASHBOARD -> if (selected) Icons.Filled.Dashboard else Icons.Outlined.Dashboard
     AutoFishTab.CALIBRATION -> if (selected) Icons.Filled.Tune else Icons.Outlined.Tune
-    AutoFishTab.GUIDE -> if (selected) Icons.Filled.MenuBook else Icons.Outlined.MenuBook
+    AutoFishTab.GUIDE -> if (selected) Icons.AutoMirrored.Filled.MenuBook else Icons.AutoMirrored.Outlined.MenuBook
 }

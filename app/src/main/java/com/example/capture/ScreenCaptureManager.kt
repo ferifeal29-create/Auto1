@@ -24,11 +24,8 @@ import kotlin.math.max
 
 /**
  * Manages MediaProjection, VirtualDisplay, and ImageReader to capture live screen Bitmaps.
- * Automatically detects orientation switches (e.g., portrait dashboard -> landscape Gridmere)
- * and resizes the VirtualDisplay and ImageReader accordingly.
- *
- * - [captureFreshBitmap]: returns ONLY a newly rendered frame (never stale cached data), ideal for fast minigame tracking.
- * - [captureLatestBitmap]: falls back to the latest cached frame when the screen is static (ideal for dialog verification).
+ * Automatically handles orientation switches (e.g., portrait dashboard -> landscape Gridmere)
+ * using VirtualDisplay.resize + setSurface (safe on Android 14+/API 34+ without recreating VirtualDisplay).
  */
 class ScreenCaptureManager(private val context: Context) {
 
@@ -37,6 +34,7 @@ class ScreenCaptureManager(private val context: Context) {
     private val windowManager =
         context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
+    private val captureLock = Any()
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
@@ -56,10 +54,21 @@ class ScreenCaptureManager(private val context: Context) {
             stop()
             onProjectionStoppedCallback?.invoke()
         }
+
+        override fun onCapturedContentResize(width: Int, height: Int) {
+            if (width <= 0 || height <= 0) return
+            val (scaledW, scaledH) = scaleDimensions(width, height)
+            synchronized(captureLock) {
+                if (mediaProjection == null || virtualDisplay == null) return
+                if (scaledW != captureWidth || scaledH != captureHeight) {
+                    resizeCapturePipelineLocked(scaledW, scaledH, captureDensity)
+                }
+            }
+        }
     }
 
     val isActive: Boolean
-        get() = mediaProjection != null && imageReader != null
+        get() = synchronized(captureLock) { mediaProjection != null && imageReader != null }
 
     fun start(
         resultCode: Int,
@@ -67,24 +76,30 @@ class ScreenCaptureManager(private val context: Context) {
         onStopped: (() -> Unit)? = null
     ): Boolean {
         stop()
-        onProjectionStoppedCallback = onStopped
 
-        val projection = projectionManager.getMediaProjection(resultCode, data) ?: return false
-        mediaProjection = projection
+        val projection = try {
+            projectionManager.getMediaProjection(resultCode, data)
+        } catch (_: Exception) {
+            null
+        } ?: return false
 
         val thread = HandlerThread("AutoFishScreenCapture").apply { start() }
-        handlerThread = thread
         val looperHandler = Handler(thread.looper)
-        handler = looperHandler
-
-        projection.registerCallback(projectionCallback, looperHandler)
 
         val (width, height, density) = readScaledDisplayMetrics()
-        captureWidth = width
-        captureHeight = height
-        captureDensity = density
 
-        createImageReaderAndDisplay(projection, width, height, density, looperHandler)
+        synchronized(captureLock) {
+            onProjectionStoppedCallback = onStopped
+            mediaProjection = projection
+            handlerThread = thread
+            handler = looperHandler
+            captureWidth = width
+            captureHeight = height
+            captureDensity = density
+
+            projection.registerCallback(projectionCallback, looperHandler)
+            createImageReaderAndDisplayLocked(projection, width, height, density, looperHandler)
+        }
         return true
     }
 
@@ -93,16 +108,14 @@ class ScreenCaptureManager(private val context: Context) {
      * Polls briefly every 6ms up to [waitIfEmptyMs] for the compositor to deliver the next frame.
      */
     suspend fun captureFreshBitmap(waitIfEmptyMs: Long = 28L): Bitmap? = withContext(Dispatchers.Default) {
-        val projection = mediaProjection ?: return@withContext null
-        ensureOrientationMatchesDisplay(projection)
+        if (!ensureOrientationMatchesDisplay()) return@withContext null
 
-        val reader = imageReader ?: return@withContext null
-        var image = acquireLatestSafe(reader)
+        var image = acquireLatestSafe()
         if (image == null && waitIfEmptyMs > 0L) {
             val deadline = System.currentTimeMillis() + waitIfEmptyMs
             while (image == null && System.currentTimeMillis() < deadline) {
                 delay(6L)
-                image = acquireLatestSafe(reader)
+                image = acquireLatestSafe()
             }
         }
         if (image == null) {
@@ -116,19 +129,20 @@ class ScreenCaptureManager(private val context: Context) {
      * display is currently static and no new Image has arrived.
      */
     suspend fun captureLatestBitmap(): Bitmap? = withContext(Dispatchers.Default) {
-        val projection = mediaProjection ?: return@withContext null
-        ensureOrientationMatchesDisplay(projection)
+        if (!ensureOrientationMatchesDisplay()) return@withContext null
 
-        val reader = imageReader ?: return@withContext null
-        val image = acquireLatestSafe(reader) ?: return@withContext copyCachedFrame()
+        val image = acquireLatestSafe() ?: return@withContext copyCachedFrame()
         return@withContext imageToBitmap(image, cacheCopy = true) ?: copyCachedFrame()
     }
 
-    private fun acquireLatestSafe(reader: ImageReader): Image? {
-        return try {
-            reader.acquireLatestImage()
-        } catch (_: IllegalStateException) {
-            null
+    private fun acquireLatestSafe(): Image? {
+        synchronized(captureLock) {
+            val reader = imageReader ?: return null
+            return try {
+                reader.acquireLatestImage()
+            } catch (_: IllegalStateException) {
+                null
+            }
         }
     }
 
@@ -172,31 +186,33 @@ class ScreenCaptureManager(private val context: Context) {
     fun stop() {
         clearCachedFrame()
 
-        try {
-            virtualDisplay?.release()
-        } catch (_: Exception) {
-        }
-        virtualDisplay = null
+        synchronized(captureLock) {
+            try {
+                virtualDisplay?.release()
+            } catch (_: Exception) {
+            }
+            virtualDisplay = null
 
-        try {
-            imageReader?.close()
-        } catch (_: Exception) {
-        }
-        imageReader = null
+            try {
+                imageReader?.close()
+            } catch (_: Exception) {
+            }
+            imageReader = null
 
-        try {
-            mediaProjection?.unregisterCallback(projectionCallback)
-            mediaProjection?.stop()
-        } catch (_: Exception) {
-        }
-        mediaProjection = null
+            try {
+                mediaProjection?.unregisterCallback(projectionCallback)
+                mediaProjection?.stop()
+            } catch (_: Exception) {
+            }
+            mediaProjection = null
 
-        try {
-            handlerThread?.quitSafely()
-        } catch (_: Exception) {
+            try {
+                handlerThread?.quitSafely()
+            } catch (_: Exception) {
+            }
+            handlerThread = null
+            handler = null
         }
-        handlerThread = null
-        handler = null
     }
 
     private fun updateCachedFrame(fresh: Bitmap) {
@@ -231,29 +247,57 @@ class ScreenCaptureManager(private val context: Context) {
         }
     }
 
-    private fun ensureOrientationMatchesDisplay(projection: MediaProjection) {
+    private fun ensureOrientationMatchesDisplay(): Boolean {
         val (targetW, targetH, targetDensity) = readScaledDisplayMetrics()
-        if (targetW != captureWidth || targetH != captureHeight) {
-            captureWidth = targetW
-            captureHeight = targetH
-            captureDensity = targetDensity
-            clearCachedFrame()
-
-            val looperHandler = handler ?: return
-            try {
-                virtualDisplay?.release()
-            } catch (_: Exception) {
+        synchronized(captureLock) {
+            if (mediaProjection == null) return false
+            if (targetW != captureWidth || targetH != captureHeight) {
+                resizeCapturePipelineLocked(targetW, targetH, targetDensity)
             }
-            try {
-                imageReader?.close()
-            } catch (_: Exception) {
-            }
-            createImageReaderAndDisplay(projection, targetW, targetH, targetDensity, looperHandler)
+            return imageReader != null
         }
     }
 
     @SuppressLint("WrongConstant")
-    private fun createImageReaderAndDisplay(
+    private fun resizeCapturePipelineLocked(width: Int, height: Int, density: Int) {
+        captureWidth = width
+        captureHeight = height
+        captureDensity = density
+        clearCachedFrame()
+
+        val display = virtualDisplay
+        val projection = mediaProjection
+        val looperHandler = handler ?: return
+
+        if (display != null) {
+            val oldReader = imageReader
+            val newReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
+            imageReader = newReader
+            try {
+                display.resize(width, height, density)
+                display.setSurface(newReader.surface)
+                oldReader?.close()
+                return
+            } catch (_: Exception) {
+                // Fall back to recreating only if resize/setSurface throws on older OEMs
+                try {
+                    display.release()
+                } catch (_: Exception) {
+                }
+                virtualDisplay = null
+                oldReader?.close()
+                newReader.close()
+                imageReader = null
+            }
+        }
+
+        if (projection != null) {
+            createImageReaderAndDisplayLocked(projection, width, height, density, looperHandler)
+        }
+    }
+
+    @SuppressLint("WrongConstant")
+    private fun createImageReaderAndDisplayLocked(
         projection: MediaProjection,
         width: Int,
         height: Int,
@@ -276,11 +320,16 @@ class ScreenCaptureManager(private val context: Context) {
 
     private fun readScaledDisplayMetrics(): Triple<Int, Int, Int> {
         val (rawWidth, rawHeight, density) = readRawDisplayMetrics()
+        val (scaledW, scaledH) = scaleDimensions(rawWidth, rawHeight)
+        return Triple(scaledW, scaledH, density)
+    }
+
+    private fun scaleDimensions(rawWidth: Int, rawHeight: Int): Pair<Int, Int> {
         val maxSide = max(rawWidth, rawHeight)
         val scale = if (maxSide > 1280) 1280f / maxSide else 1f
         val scaledW = max(320, (rawWidth * scale).toInt() and 0xFFFFFFFE.toInt())
         val scaledH = max(240, (rawHeight * scale).toInt() and 0xFFFFFFFE.toInt())
-        return Triple(scaledW, scaledH, density)
+        return scaledW to scaledH
     }
 
     @Suppress("DEPRECATION")

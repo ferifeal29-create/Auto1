@@ -69,8 +69,8 @@ class WaterBlockDetector {
             }
         }
 
-        // Fallback alternate if water wasn't confident on opposite side
-        val alternate = bestOtherSidePoint ?: if (bestPoint != null) {
+        // Fallback alternate only if water wasn't confident on opposite side
+        val alternate = bestOtherSidePoint ?: if (bestPoint != null && bestScore < 0.45f) {
             if (bestPoint.x < 0.5f) RelativePoint(0.66f, 0.56f) else RelativePoint(0.34f, 0.56f)
         } else {
             null
@@ -93,38 +93,51 @@ class WaterBlockDetector {
 
         val cx = (baitPoint.x.coerceIn(0.05f, 0.95f) * w).toInt()
         val cy = (baitPoint.y.coerceIn(0.05f, 0.95f) * h).toInt()
-        val rx = max(6, (w * 0.025f).toInt())
-        val ry = max(5, (h * 0.045f).toInt())
+        val minRx = max(4, (w * 0.016f).toInt())
+        val maxRx = max(minRx + 2, (w * 0.036f).toInt())
+        val minRy = max(4, (h * 0.032f).toInt())
+        val maxRy = max(minRy + 2, (h * 0.072f).toInt())
 
-        var orangeHits = 0
-        var samples = 0
+        var leftEdgeHits = 0
+        var rightEdgeHits = 0
+        var topEdgeHits = 0
+        var bottomEdgeHits = 0
 
-        // Sample top & side edges around the slot where the orange border sits
-        for (dx in -rx..rx step max(1, rx / 3)) {
-            val px = (cx + dx).coerceIn(0, w - 1)
-            for (edgeY in intArrayOf(cy - ry, cy - ry + 2, cy + ry - 1)) {
-                val py = edgeY.coerceIn(0, h - 1)
-                if (isOrangeBorder(bitmap.getPixel(px, py))) orangeHits++
-                samples++
-            }
-        }
-        for (dy in -ry..ry step max(1, ry / 3)) {
+        val stepX = max(1, (w * 0.002f).toInt())
+        val stepY = max(1, (h * 0.004f).toInt())
+
+        // Scan left & right vertical perimeter bands
+        for (dy in -minRy..minRy step stepY) {
             val py = (cy + dy).coerceIn(0, h - 1)
-            for (edgeX in intArrayOf(cx - rx, cx + rx)) {
-                val px = edgeX.coerceIn(0, w - 1)
-                if (isOrangeBorder(bitmap.getPixel(px, py))) orangeHits++
-                samples++
+            for (dx in minRx..maxRx step stepX) {
+                val lx = (cx - dx).coerceIn(0, w - 1)
+                val rx = (cx + dx).coerceIn(0, w - 1)
+                if (isOrangeBorder(bitmap.getPixel(lx, py))) leftEdgeHits++
+                if (isOrangeBorder(bitmap.getPixel(rx, py))) rightEdgeHits++
             }
         }
 
-        return samples > 0 && orangeHits >= 4
+        // Scan top & bottom horizontal perimeter bands
+        for (dx in -minRx..minRx step stepX) {
+            val px = (cx + dx).coerceIn(0, w - 1)
+            for (dy in minRy..maxRy step stepY) {
+                val ty = (cy - dy).coerceIn(0, h - 1)
+                val by = (cy + dy).coerceIn(0, h - 1)
+                if (isOrangeBorder(bitmap.getPixel(px, ty))) topEdgeHits++
+                if (isOrangeBorder(bitmap.getPixel(px, by))) bottomEdgeHits++
+            }
+        }
+
+        val sidesWithOrange = listOf(leftEdgeHits, rightEdgeHits, topEdgeHits, bottomEdgeHits).count { it >= 2 }
+        val totalHits = leftEdgeHits + rightEdgeHits + topEdgeHits + bottomEdgeHits
+        return sidesWithOrange >= 2 || totalHits >= 10
     }
 
     private fun isOrangeBorder(pixel: Int): Boolean {
         val r = Color.red(pixel)
         val g = Color.green(pixel)
         val b = Color.blue(pixel)
-        return r >= 200 && g in 105..195 && b <= 75 && (r - b) >= 135
+        return r >= 200 && g in 100..195 && b <= 75 && (r - b) >= 130
     }
 
     private fun scoreWaterPatch(bitmap: Bitmap, center: RelativePoint): Float {

@@ -98,17 +98,17 @@ data class CalibrationConfig(
     }
 
     companion object {
-        const val CURRENT_SCHEMA_VERSION = 2
+        const val CURRENT_SCHEMA_VERSION = 3
 
-        val DEFAULT_BAIT_POINT = RelativePoint(0.422f, 0.910f)
+        val DEFAULT_BAIT_POINT = RelativePoint(0.425f, 0.925f)
         val DEFAULT_CAST_POINT = RelativePoint(0.270f, 0.530f)
         val DEFAULT_HOOK_POINT = RelativePoint(0.880f, 0.840f)
         val DEFAULT_SELL_POINT = RelativePoint(0.432f, 0.700f)
         val DEFAULT_KEEP_POINT = RelativePoint(0.568f, 0.700f)
         val DEFAULT_MINIGAME_PRIMARY_POINT = RelativePoint(0.880f, 0.840f)
-        val DEFAULT_MINIGAME_LEFT_POINT = RelativePoint(0.058f, 0.840f)
-        val DEFAULT_MINIGAME_RIGHT_POINT = RelativePoint(0.168f, 0.840f)
-        val DEFAULT_MINIGAME_BAR_REGION = RelativeRect(0.240f, 0.065f, 0.725f, 0.170f)
+        val DEFAULT_MINIGAME_LEFT_POINT = RelativePoint(0.060f, 0.725f)
+        val DEFAULT_MINIGAME_RIGHT_POINT = RelativePoint(0.170f, 0.725f)
+        val DEFAULT_MINIGAME_BAR_REGION = RelativeRect(0.275f, 0.100f, 0.725f, 0.215f)
         val DEFAULT_DIALOG_REGION = RelativeRect(0.330f, 0.210f, 0.670f, 0.770f)
     }
 }

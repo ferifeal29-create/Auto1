@@ -14,9 +14,11 @@ import com.example.vision.DialogDetector
 import com.example.vision.MinigameAnalyzer
 import com.example.vision.WaterBlockDetector
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 
 /**
@@ -193,7 +195,7 @@ class AutoFishEngine(
                 return WaitOutcome.TIMED_OUT
             }
 
-            val bitmap = captureFreshSafe(waitIfEmptyMs = 18L)
+            val bitmap = captureFreshSafe(waitIfEmptyMs = 22L) ?: captureLatestSafe()
             if (bitmap != null) {
                 var dialogOpen = false
                 var minigameActive = false
@@ -256,7 +258,7 @@ class AutoFishEngine(
         for (probe in 0 until 28) {
             delay(80L)
             val latestConfig = configProvider()
-            val bmp = captureFreshSafe(waitIfEmptyMs = 18L) ?: continue
+            val bmp = captureFreshSafe(waitIfEmptyMs = 20L) ?: captureLatestSafe() ?: continue
 
             var dialogOpen = false
             var minigameActive = false
@@ -287,7 +289,7 @@ class AutoFishEngine(
                 AutoFishStateStore.updateVisionTelemetry(fishX, barX, true, false)
                 return WaitOutcome.MINIGAME_STARTED
             }
-            if (stillBlackBars && !retriedHook && probe >= 5) {
+            if (stillBlackBars && !retriedHook && probe >= 13) {
                 retriedHook = true
                 AutoFishStateStore.appendLog("Bar hitam masih aktif, tekan ulang panah bawah ↓", LogLevel.WARNING)
                 accessibility.tapRelative(latestConfig.hookPoint, durationMs = 70L)
@@ -318,178 +320,211 @@ class AutoFishEngine(
         var smoothedFishVel = 0f
         var lastCatchPullAtMs = 0L
         var consecutiveNullFrames = 0
+        var activeHold: AutoFishAccessibilityService.HoldHandle? = null
 
-        while (currentCoroutineContext().isActive) {
-            val config = configProvider()
-            val fresh = captureFreshSafe(waitIfEmptyMs = 28L)
-            val bitmap = if (fresh != null) {
-                consecutiveNullFrames = 0
-                fresh
-            } else {
-                consecutiveNullFrames++
-                if (consecutiveNullFrames >= 2) {
+        try {
+            while (currentCoroutineContext().isActive) {
+                val config = configProvider()
+                val fresh = captureFreshSafe(waitIfEmptyMs = 28L)
+                val bitmap = if (fresh != null) {
                     consecutiveNullFrames = 0
-                    captureLatestSafe()
+                    fresh
                 } else {
-                    null
+                    consecutiveNullFrames++
+                    if (consecutiveNullFrames >= 2) {
+                        consecutiveNullFrames = 0
+                        captureLatestSafe()
+                    } else {
+                        null
+                    }
                 }
-            }
-            if (bitmap == null) {
-                delay(12L)
-                continue
-            }
-
-            var dialogVisible = false
-            var minigameActive = false
-            var fishX: Float? = null
-            var barX: Float? = null
-            var barWidth = 0.14f
-            var catchProgress = 0f
-            var isCatchReady = false
-
-            try {
-                val dialog = dialogDetector.detect(bitmap, config)
-                dialogVisible = dialog.isFishCaughtDialogVisible
-                if (!dialogVisible) {
-                    val analysis = minigameAnalyzer.analyze(bitmap, config)
-                    minigameActive = analysis.isMinigameActive
-                    fishX = analysis.fishX
-                    barX = analysis.barX
-                    barWidth = analysis.barWidth
-                    catchProgress = analysis.catchProgress
-                    isCatchReady = analysis.isCatchReady
-                }
-            } finally {
-                bitmap.recycle()
-            }
-
-            if (dialogVisible) {
-                AutoFishStateStore.updateVisionTelemetry(null, null, false, true)
-                return true
-            }
-
-            if (minigameActive && barX != null) {
-                missingMinigameFrames = 0
-                val nowMs = System.currentTimeMillis()
-                val trackedFishX = fishX ?: lastKnownFishX
-                lastKnownFishX = trackedFishX
-
-                if (isCatchReady && (nowMs - lastCatchPullAtMs) >= 420L) {
-                    lastCatchPullAtMs = nowMs
-                    AutoFishStateStore.updateStatus(
-                        BotStatus.HOOKING,
-                        "Bar biru penuh (${(catchProgress * 100).toInt()}%)! Menekan panah bawah ↓"
-                    )
-                    AutoFishStateStore.appendLog(
-                        "Bar progres penuh (${(catchProgress * 100).toInt()}%)! Menekan panah bawah ↓ untuk menangkap ikan",
-                        LogLevel.SUCCESS
-                    )
-                    accessibility.tapRelative(config.hookPoint, durationMs = 70L)
-                    delay(160L)
+                if (bitmap == null) {
+                    delay(12L)
                     continue
                 }
 
-                if (prevFrameTimeMs > 0L && prevFishX != null && fishX != null) {
-                    val dtSec = ((nowMs - prevFrameTimeMs) / 1000f).coerceIn(0.02f, 0.30f)
-                    val instantVel = ((fishX - prevFishX) / dtSec).coerceIn(-2.8f, 2.8f)
-                    smoothedFishVel = if (smoothedFishVel * instantVel < -0.02f) {
-                        instantVel * 0.72f
-                    } else {
-                        smoothedFishVel * 0.40f + instantVel * 0.60f
+                var dialogVisible = false
+                var minigameActive = false
+                var fishX: Float? = null
+                var barX: Float? = null
+                var barWidth = 0.14f
+                var catchProgress = 0f
+                var isCatchReady = false
+
+                try {
+                    val dialog = dialogDetector.detect(bitmap, config)
+                    dialogVisible = dialog.isFishCaughtDialogVisible
+                    if (!dialogVisible) {
+                        val analysis = minigameAnalyzer.analyze(bitmap, config)
+                        minigameActive = analysis.isMinigameActive
+                        fishX = analysis.fishX
+                        barX = analysis.barX
+                        barWidth = analysis.barWidth
+                        catchProgress = analysis.catchProgress
+                        isCatchReady = analysis.isCatchReady
                     }
+                } finally {
+                    bitmap.recycle()
                 }
-                prevFishX = trackedFishX
-                prevFrameTimeMs = nowMs
 
-                AutoFishStateStore.updateVisionTelemetry(
-                    fishX = trackedFishX,
-                    barX = barX,
-                    minigameDetected = true,
-                    dialogDetected = false
-                )
-
-                val leadOffset = (smoothedFishVel * 0.045f).coerceIn(-0.06f, 0.06f)
-                val targetFishX = (trackedFishX + leadOffset).coerceIn(0.02f, 0.98f)
-                val delta = targetFishX - barX
-                val absDelta = abs(delta)
-                val deadzone = (barWidth * 0.16f).coerceIn(0.018f, 0.036f)
-
-                when (config.minigameControlMode) {
-                    MinigameControlMode.DUAL_DIRECTION -> {
-                        if (absDelta > deadzone) {
-                            var pulse = 28f + (absDelta * 420f)
-                            if (delta * smoothedFishVel > 0.025f) {
-                                pulse *= 1.20f // fish moving away
-                            } else if (delta * smoothedFishVel < -0.025f) {
-                                pulse *= 0.72f // fish moving toward box
-                            }
-                            val pulseMs = pulse.toLong().coerceIn(30L, 125L)
-                            val movingLeft = delta < 0f
-                            val targetPoint = if (movingLeft) {
-                                config.minigameLeftPoint
-                            } else {
-                                config.minigameRightPoint
-                            }
-                            AutoFishStateStore.updateStatus(
-                                BotStatus.MINIGAME,
-                                "Ikan=${"%.2f".format(trackedFishX)} | Kotak=${"%.2f".format(barX)} -> ${if (movingLeft) "KIRI" else "KANAN"} (${pulseMs}ms)"
-                            )
-                            accessibility.tapRelative(targetPoint, durationMs = pulseMs)
-                            delay(8L)
-                        } else {
-                            AutoFishStateStore.updateStatus(
-                                BotStatus.MINIGAME,
-                                "Tepat di ikan! Ikan=${"%.2f".format(trackedFishX)} | Kotak=${"%.2f".format(barX)}"
-                            )
-                            delay(22L)
-                        }
-                    }
-
-                    MinigameControlMode.SINGLE_TAP_HOLD -> {
-                        val shouldPress = if (config.invertSingleControl) {
-                            delta < -deadzone
-                        } else {
-                            delta > deadzone
-                        }
-                        if (shouldPress) {
-                            val pulseMs = (32f + (absDelta * 400f)).toLong().coerceIn(32L, 125L)
-                            AutoFishStateStore.updateStatus(
-                                BotStatus.MINIGAME,
-                                "Kontrol Tunggal (${pulseMs}ms) | Ikan=${"%.2f".format(trackedFishX)}"
-                            )
-                            accessibility.tapRelative(config.minigamePrimaryPoint, durationMs = pulseMs)
-                            delay(8L)
-                        } else {
-                            delay(22L)
-                        }
-                    }
+                if (dialogVisible) {
+                    accessibility.releaseHold(activeHold)
+                    activeHold = null
+                    AutoFishStateStore.updateVisionTelemetry(null, null, false, true)
+                    return true
                 }
-            } else {
-                missingMinigameFrames++
-                if (missingMinigameFrames >= 7) {
-                    AutoFishStateStore.updateStatus(
-                        BotStatus.DIALOG_DETECTED,
-                        "Minigame selesai, menunggu dialog Fish Caught!..."
+
+                if (minigameActive && barX != null) {
+                    missingMinigameFrames = 0
+                    val nowMs = System.currentTimeMillis()
+                    val trackedFishX = fishX ?: lastKnownFishX
+                    lastKnownFishX = trackedFishX
+
+                    if (isCatchReady && (nowMs - lastCatchPullAtMs) >= 420L) {
+                        accessibility.releaseHold(activeHold)
+                        activeHold = null
+                        lastCatchPullAtMs = nowMs
+                        AutoFishStateStore.updateStatus(
+                            BotStatus.HOOKING,
+                            "Bar biru penuh (${(catchProgress * 100).toInt()}%)! Menekan panah bawah ↓"
+                        )
+                        AutoFishStateStore.appendLog(
+                            "Bar progres penuh (${(catchProgress * 100).toInt()}%)! Menekan panah bawah ↓ untuk menangkap ikan",
+                            LogLevel.SUCCESS
+                        )
+                        accessibility.tapRelative(config.hookPoint, durationMs = 70L)
+                        delay(160L)
+                        continue
+                    }
+
+                    if (prevFrameTimeMs > 0L && prevFishX != null && fishX != null) {
+                        val dtSec = ((nowMs - prevFrameTimeMs) / 1000f).coerceIn(0.02f, 0.30f)
+                        val instantVel = ((fishX - prevFishX) / dtSec).coerceIn(-2.8f, 2.8f)
+                        smoothedFishVel = if (smoothedFishVel * instantVel < -0.02f) {
+                            instantVel * 0.72f
+                        } else {
+                            smoothedFishVel * 0.40f + instantVel * 0.60f
+                        }
+                    }
+                    prevFishX = trackedFishX
+                    prevFrameTimeMs = nowMs
+
+                    AutoFishStateStore.updateVisionTelemetry(
+                        fishX = trackedFishX,
+                        barX = barX,
+                        minigameDetected = true,
+                        dialogDetected = false
                     )
-                    for (probe in 0 until 20) {
-                        delay(180L)
-                        val latestConfig = configProvider()
-                        val probeBmp = captureLatestSafe() ?: continue
-                        val foundDialog = try {
-                            dialogDetector.detect(probeBmp, latestConfig).isFishCaughtDialogVisible
-                        } finally {
-                            probeBmp.recycle()
+
+                    val leadOffset = (smoothedFishVel * 0.042f).coerceIn(-0.055f, 0.055f)
+                    val targetFishX = (trackedFishX + leadOffset).coerceIn(0.02f, 0.98f)
+                    val delta = targetFishX - barX
+                    val absDelta = abs(delta)
+                    val deadzone = (barWidth * 0.28f).coerceIn(0.028f, 0.045f)
+
+                    when (config.minigameControlMode) {
+                        MinigameControlMode.DUAL_DIRECTION -> {
+                            if (absDelta > deadzone) {
+                                var pulse = 36f + (absDelta * 260f)
+                                if (delta * smoothedFishVel > 0.025f) {
+                                    pulse *= 1.15f
+                                } else if (delta * smoothedFishVel < -0.025f) {
+                                    pulse *= 0.80f
+                                }
+                                val segmentMs = pulse.toLong().coerceIn(38L, 95L)
+                                val movingLeft = delta < 0f
+                                val targetPoint = if (movingLeft) {
+                                    config.minigameLeftPoint
+                                } else {
+                                    config.minigameRightPoint
+                                }
+                                AutoFishStateStore.updateStatus(
+                                    BotStatus.MINIGAME,
+                                    "Ikan=${"%.2f".format(trackedFishX)} | Kotak=${"%.2f".format(barX)} -> ${if (movingLeft) "KIRI" else "KANAN"} (${segmentMs}ms)"
+                                )
+                                val nextHold = accessibility.dispatchContinuousHold(activeHold, targetPoint, segmentMs)
+                                if (nextHold != null) {
+                                    activeHold = nextHold
+                                } else {
+                                    activeHold = null
+                                    accessibility.tapRelative(targetPoint, durationMs = segmentMs)
+                                }
+                                delay(16L)
+                            } else {
+                                accessibility.releaseHold(activeHold)
+                                activeHold = null
+                                AutoFishStateStore.updateStatus(
+                                    BotStatus.MINIGAME,
+                                    "Tepat di ikan! Ikan=${"%.2f".format(trackedFishX)} | Kotak=${"%.2f".format(barX)}"
+                                )
+                                delay(22L)
+                            }
                         }
-                        if (foundDialog) {
-                            return true
+
+                        MinigameControlMode.SINGLE_TAP_HOLD -> {
+                            val shouldPress = if (config.invertSingleControl) {
+                                delta < -deadzone
+                            } else {
+                                delta > deadzone
+                            }
+                            if (shouldPress) {
+                                val segmentMs = (38f + (absDelta * 260f)).toLong().coerceIn(38L, 95L)
+                                AutoFishStateStore.updateStatus(
+                                    BotStatus.MINIGAME,
+                                    "Kontrol Tunggal (${segmentMs}ms) | Ikan=${"%.2f".format(trackedFishX)}"
+                                )
+                                val nextHold = accessibility.dispatchContinuousHold(
+                                    activeHold,
+                                    config.minigamePrimaryPoint,
+                                    segmentMs
+                                )
+                                if (nextHold != null) {
+                                    activeHold = nextHold
+                                } else {
+                                    activeHold = null
+                                    accessibility.tapRelative(config.minigamePrimaryPoint, durationMs = segmentMs)
+                                }
+                                delay(16L)
+                            } else {
+                                accessibility.releaseHold(activeHold)
+                                activeHold = null
+                                delay(22L)
+                            }
                         }
                     }
-                    return false
+                } else {
+                    accessibility.releaseHold(activeHold)
+                    activeHold = null
+                    missingMinigameFrames++
+                    if (missingMinigameFrames >= 7) {
+                        AutoFishStateStore.updateStatus(
+                            BotStatus.DIALOG_DETECTED,
+                            "Minigame selesai, menunggu dialog Fish Caught!..."
+                        )
+                        for (probe in 0 until 20) {
+                            delay(180L)
+                            val latestConfig = configProvider()
+                            val probeBmp = captureLatestSafe() ?: continue
+                            val foundDialog = try {
+                                dialogDetector.detect(probeBmp, latestConfig).isFishCaughtDialogVisible
+                            } finally {
+                                probeBmp.recycle()
+                            }
+                            if (foundDialog) {
+                                return true
+                            }
+                        }
+                        return false
+                    }
+                    delay(35L)
                 }
-                delay(35L)
+            }
+            throw CancellationException("Stopped during minigame")
+        } finally {
+            withContext(NonCancellable) {
+                accessibility.releaseHold(activeHold)
             }
         }
-        throw CancellationException("Stopped during minigame")
     }
 
     private suspend fun handleFishCaughtDialog(

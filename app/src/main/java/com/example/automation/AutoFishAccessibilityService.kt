@@ -86,19 +86,31 @@ class AutoFishAccessibilityService : AccessibilityService() {
     /**
      * Begins or continues a zero-gap continuous touch hold at [point] for [segmentMs]
      * using StrokeDescription.continueStroke on API 26+.
-     * Returns an active [HoldHandle] whose [completion] completes when [segmentMs] finishes.
+     * Awaits [previousHandle] segment completion before chaining so Android never cancels the gesture.
      */
-    fun dispatchContinuousHold(
+    suspend fun dispatchContinuousHold(
         previousHandle: HoldHandle?,
         point: RelativePoint,
-        segmentMs: Long = 48L
+        segmentMs: Long = 56L
     ): HoldHandle? {
+        val canChain = if (previousHandle != null) {
+            val prevOk = previousHandle.completion.await()
+            prevOk && previousHandle.canContinue && previousHandle.lastPoint == point
+        } else {
+            false
+        }
+
+        if (previousHandle != null && !canChain && previousHandle.lastPoint != point) {
+            // Release previous point cleanly before starting at a different coordinate
+            releaseHold(previousHandle)
+        }
+
         val (px, py) = toScreenPixels(point) ?: return null
         val safeDuration = segmentMs.coerceIn(25L, 200L)
         val path = Path().apply { moveTo(px, py) }
 
         val stroke = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            if (previousHandle != null) {
+            if (canChain && previousHandle != null) {
                 previousHandle.stroke.continueStroke(path, 0L, safeDuration, true)
             } else {
                 GestureDescription.StrokeDescription(path, 0L, safeDuration, true)
@@ -141,7 +153,6 @@ class AutoFishAccessibilityService : AccessibilityService() {
      */
     suspend fun releaseHold(handle: HoldHandle?): Boolean {
         if (handle == null) return true
-        // Wait for the currently running segment to finish before chaining the release stroke
         val segmentOk = handle.completion.await()
         if (!handle.canContinue || !segmentOk) {
             return true

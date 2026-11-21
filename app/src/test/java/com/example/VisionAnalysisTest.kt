@@ -257,4 +257,80 @@ class VisionAnalysisTest {
             bitmap.setPixels(row, 0, w, l, y, w, 1)
         }
     }
+
+    @Test
+    fun `detectors accurately classify real Gridmere screenshots`() {
+        val dir = java.io.File("../public/assets/aistudio")
+        if (!dir.exists()) return
+
+        fun loadGameFrame(filename: String): Bitmap {
+            val file = java.io.File(dir, filename)
+            val bmp = android.graphics.BitmapFactory.decodeFile(file.absolutePath)!!
+            if (bmp.height <= bmp.width) return bmp
+            var topY = 0
+            var botY = bmp.height - 1
+            val cx = bmp.width / 2
+            for (y in (bmp.height * 0.25).toInt() until (bmp.height * 0.75).toInt()) {
+                val p = bmp.getPixel(cx, y)
+                if (Color.red(p) < 230 || Color.green(p) < 230 || Color.blue(p) < 230) {
+                    topY = y
+                    break
+                }
+            }
+            for (y in (bmp.height * 0.75).toInt() downTo (bmp.height * 0.25).toInt()) {
+                val p = bmp.getPixel(cx, y)
+                if (Color.red(p) < 230 || Color.green(p) < 230 || Color.blue(p) < 230) {
+                    botY = y
+                    break
+                }
+            }
+            val cropped = Bitmap.createBitmap(bmp, 0, topY, bmp.width, (botY - topY + 1).coerceAtLeast(10))
+            bmp.recycle()
+            return cropped
+        }
+
+        // 1. Fish Caught Dialog
+        loadGameFrame("game_Screenshot_20261119-031506_92e34bdd.jpg").let { bmp ->
+            val dlg = dialogDetector.detect(bmp, config)
+            assertTrue("Expected Fish Caught dialog visible", dlg.isFishCaughtDialogVisible)
+            assertTrue("Expected Sell button detected", dlg.hasSellButton)
+            assertTrue("Expected Keep button detected", dlg.hasKeepButton)
+            bmp.recycle()
+        }
+
+        // 2. Bait selected + Water on left
+        loadGameFrame("game_Screenshot_20261120-110437_3f652c2a.jpg").let { bmp ->
+            assertTrue("Expected worm bait slot selected", waterBlockDetector.isBaitSlotSelected(bmp, config.baitPoint))
+            val water = waterBlockDetector.detectWaterNearCharacter(bmp)
+            assertNotNull("Expected water block detected", water.detectedPoint)
+            assertTrue("Expected water on left of character", water.detectedPoint!!.x < 0.45f)
+            assertFalse("Idle state should not trigger bite", biteDetector.detect(bmp).isBiteCinematicVisible)
+            bmp.recycle()
+        }
+
+        // 3. Bite black cinematic bars
+        loadGameFrame("game_Screenshot_20261120-110515_2b048c6d.jpg").let { bmp ->
+            assertTrue("Expected bite cinematic bars detected", biteDetector.detect(bmp).isBiteCinematicVisible)
+            bmp.recycle()
+        }
+
+        // 4. Minigame mid-progress (~47%)
+        loadGameFrame("Screenshot_20261120-112632_239af61a.jpg").let { bmp ->
+            val res = minigameAnalyzer.analyze(bmp, config)
+            assertTrue("Expected minigame active", res.isMinigameActive)
+            assertTrue("Expected fish inside bar", res.isFishInsideBar)
+            assertFalse("Mid-progress should NOT be catch-ready", res.isCatchReady)
+            assertTrue("Expected catchProgress in 0.30..0.65, got ${res.catchProgress}", res.catchProgress in 0.30f..0.65f)
+            bmp.recycle()
+        }
+
+        // 5. Minigame full progress (catch-ready)
+        loadGameFrame("Screenshot_20261120-112655_a3173573.jpg").let { bmp ->
+            val res = minigameAnalyzer.analyze(bmp, config)
+            assertTrue("Expected minigame active", res.isMinigameActive)
+            assertTrue("Expected fish inside bar", res.isFishInsideBar)
+            assertTrue("Expected catch-ready at full progress, got $res", res.isCatchReady)
+            bmp.recycle()
+        }
+    }
 }
