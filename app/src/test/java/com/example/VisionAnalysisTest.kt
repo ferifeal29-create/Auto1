@@ -332,5 +332,30 @@ class VisionAnalysisTest {
             assertTrue("Expected catch-ready at full progress, got $res", res.isCatchReady)
             bmp.recycle()
         }
+
+        // 6. Active minigame with hollow green box and dark fish outside on the right
+        loadGameFrame("game_Screenshot_20261122-060817_c37ebd32.jpg").let { bmp ->
+            val res = minigameAnalyzer.analyze(bmp, config)
+            assertTrue("Expected minigame active for 060817, got $res", res.isMinigameActive)
+            assertFalse("Expected fish outside hollow box, got $res", res.isFishInsideBar)
+            assertNotNull("Expected barX detected", res.barX)
+            assertNotNull("Expected dark fishX detected", res.fishX)
+            assertTrue("Expected barX near center (0.45..0.56), got ${res.barX}", res.barX!! in 0.45f..0.56f)
+            assertTrue("Expected fishX to the right of box (> 0.68), got ${res.fishX}", res.fishX!! > 0.68f)
+            assertTrue("Expected low initial catchProgress (0.01..0.15), got ${res.catchProgress}", res.catchProgress in 0.01f..0.15f)
+            assertFalse("Initial progress should NOT be catch-ready", res.isCatchReady)
+
+            // Also verify at live ScreenCaptureManager scaled resolution (1280x576)
+            val scaled = Bitmap.createScaledBitmap(bmp, 1280, 576, true)
+            val scaledRes = minigameAnalyzer.analyze(scaled, config)
+            assertTrue("Expected minigame active at 1280x576, got $scaledRes", scaledRes.isMinigameActive)
+            assertFalse("Expected fish outside box at 1280x576, got $scaledRes", scaledRes.isFishInsideBar)
+            assertNotNull("Expected barX at 1280x576", scaledRes.barX)
+            assertNotNull("Expected fishX at 1280x576", scaledRes.fishX)
+            assertTrue("Expected barX near center at 1280x576, got ${scaledRes.barX}", scaledRes.barX!! in 0.44f..0.57f)
+            assertTrue("Expected fishX to the right at 1280x576 (> 0.68), got ${scaledRes.fishX}", scaledRes.fishX!! > 0.68f)
+            scaled.recycle()
+            bmp.recycle()
+        }
     }
 }

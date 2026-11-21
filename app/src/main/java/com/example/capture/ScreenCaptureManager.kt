@@ -16,10 +16,10 @@ import android.os.Handler
 import android.os.HandlerThread
 import android.util.DisplayMetrics
 import android.view.WindowManager
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.withContext
-import java.nio.ByteBuffer
 import kotlin.math.max
 
 /**
@@ -46,8 +46,46 @@ class ScreenCaptureManager(private val context: Context) {
     private var captureDensity: Int = DisplayMetrics.DENSITY_DEFAULT
     private var onProjectionStoppedCallback: (() -> Unit)? = null
 
+    val frameProcessorLoop = FrameProcessorLoop()
+
     private val cacheLock = Any()
     private var lastFrameBitmap: Bitmap? = null
+    @Volatile
+    private var lastCacheUpdateMs: Long = 0L
+
+    private val imageAvailableListener = ImageReader.OnImageAvailableListener { reader ->
+        val isCurrentReader = synchronized(captureLock) {
+            mediaProjection != null && reader === imageReader
+        }
+        if (!isCurrentReader) return@OnImageAvailableListener
+
+        val image = try {
+            reader.acquireLatestImage()
+        } catch (_: IllegalStateException) {
+            null
+        } ?: return@OnImageAvailableListener
+
+        val t0 = System.currentTimeMillis()
+        val bitmap = try {
+            ImageBitmapConverter.imageToDetectionBitmap(image)
+        } finally {
+            image.close()
+        } ?: return@OnImageAvailableListener
+
+        val now = System.currentTimeMillis()
+        val shouldRefreshCache = (now - lastCacheUpdateMs) >= 120L ||
+            synchronized(cacheLock) { lastFrameBitmap == null || lastFrameBitmap?.isRecycled == true }
+        if (shouldRefreshCache) {
+            updateCachedFrame(bitmap)
+            lastCacheUpdateMs = now
+        }
+
+        frameProcessorLoop.submitBitmap(
+            bitmap = bitmap,
+            convertDurationMs = (now - t0).coerceAtLeast(0L),
+            timestampMs = now
+        )
+    }
 
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() {
@@ -104,24 +142,26 @@ class ScreenCaptureManager(private val context: Context) {
     }
 
     /**
+     * Starts a continuous frame processing loop that feeds converted [Bitmap.Config.ARGB_8888]
+     * frames from MediaProjection [ImageReader] directly into [onFrame] for object detection.
+     */
+    fun startFrameProcessingLoop(
+        scope: CoroutineScope,
+        frameWaitTimeoutMs: Long = 100L,
+        onFrame: suspend (DetectionFrame) -> Unit
+    ): Job = frameProcessorLoop.start(
+        scope = scope,
+        frameWaitTimeoutMs = frameWaitTimeoutMs,
+        onFrame = onFrame
+    )
+
+    /**
      * Captures ONLY a freshly rendered frame from ImageReader (never returns stale cached bitmaps).
-     * Polls briefly every 6ms up to [waitIfEmptyMs] for the compositor to deliver the next frame.
+     * Suspends cleanly on the event-driven [FrameProcessorLoop] until the next frame arrives.
      */
     suspend fun captureFreshBitmap(waitIfEmptyMs: Long = 28L): Bitmap? = withContext(Dispatchers.Default) {
         if (!ensureOrientationMatchesDisplay()) return@withContext null
-
-        var image = acquireLatestSafe()
-        if (image == null && waitIfEmptyMs > 0L) {
-            val deadline = System.currentTimeMillis() + waitIfEmptyMs
-            while (image == null && System.currentTimeMillis() < deadline) {
-                delay(6L)
-                image = acquireLatestSafe()
-            }
-        }
-        if (image == null) {
-            return@withContext null
-        }
-        return@withContext imageToBitmap(image, cacheCopy = false)
+        return@withContext frameProcessorLoop.awaitNextFrame(waitIfEmptyMs)?.bitmap
     }
 
     /**
@@ -130,60 +170,17 @@ class ScreenCaptureManager(private val context: Context) {
      */
     suspend fun captureLatestBitmap(): Bitmap? = withContext(Dispatchers.Default) {
         if (!ensureOrientationMatchesDisplay()) return@withContext null
-
-        val image = acquireLatestSafe() ?: return@withContext copyCachedFrame()
-        return@withContext imageToBitmap(image, cacheCopy = true) ?: copyCachedFrame()
-    }
-
-    private fun acquireLatestSafe(): Image? {
-        synchronized(captureLock) {
-            val reader = imageReader ?: return null
-            return try {
-                reader.acquireLatestImage()
-            } catch (_: IllegalStateException) {
-                null
-            }
+        val fresh = frameProcessorLoop.awaitNextFrame(timeoutMs = 0L)?.bitmap
+        if (fresh != null) {
+            updateCachedFrame(fresh)
+            lastCacheUpdateMs = System.currentTimeMillis()
+            return@withContext fresh
         }
-    }
-
-    private fun imageToBitmap(image: Image, cacheCopy: Boolean): Bitmap? {
-        try {
-            val planes = image.planes
-            if (planes.isEmpty()) return null
-            val plane = planes[0]
-            val buffer: ByteBuffer = plane.buffer
-            val pixelStride = plane.pixelStride
-            val rowStride = plane.rowStride
-            val rowPadding = rowStride - pixelStride * image.width
-
-            val tempWidth = image.width + max(0, rowPadding / max(1, pixelStride))
-            val paddedBitmap = Bitmap.createBitmap(
-                tempWidth,
-                image.height,
-                Bitmap.Config.ARGB_8888
-            )
-            paddedBitmap.copyPixelsFromBuffer(buffer)
-
-            val fresh = if (tempWidth == image.width) {
-                paddedBitmap
-            } else {
-                val cropped = Bitmap.createBitmap(paddedBitmap, 0, 0, image.width, image.height)
-                paddedBitmap.recycle()
-                cropped
-            }
-
-            if (cacheCopy) {
-                updateCachedFrame(fresh)
-            }
-            return fresh
-        } catch (_: Exception) {
-            return null
-        } finally {
-            image.close()
-        }
+        return@withContext copyCachedFrame()
     }
 
     fun stop() {
+        frameProcessorLoop.stop()
         clearCachedFrame()
 
         synchronized(captureLock) {
@@ -194,6 +191,7 @@ class ScreenCaptureManager(private val context: Context) {
             virtualDisplay = null
 
             try {
+                imageReader?.setOnImageAvailableListener(null, null)
                 imageReader?.close()
             } catch (_: Exception) {
             }
@@ -263,7 +261,9 @@ class ScreenCaptureManager(private val context: Context) {
         captureWidth = width
         captureHeight = height
         captureDensity = density
+        frameProcessorLoop.clearPending()
         clearCachedFrame()
+        lastCacheUpdateMs = 0L
 
         val display = virtualDisplay
         val projection = mediaProjection
@@ -271,11 +271,14 @@ class ScreenCaptureManager(private val context: Context) {
 
         if (display != null) {
             val oldReader = imageReader
-            val newReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
+            val newReader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3).apply {
+                setOnImageAvailableListener(imageAvailableListener, looperHandler)
+            }
             imageReader = newReader
             try {
                 display.resize(width, height, density)
                 display.setSurface(newReader.surface)
+                oldReader?.setOnImageAvailableListener(null, null)
                 oldReader?.close()
                 return
             } catch (_: Exception) {
@@ -285,7 +288,9 @@ class ScreenCaptureManager(private val context: Context) {
                 } catch (_: Exception) {
                 }
                 virtualDisplay = null
+                oldReader?.setOnImageAvailableListener(null, null)
                 oldReader?.close()
+                newReader.setOnImageAvailableListener(null, null)
                 newReader.close()
                 imageReader = null
             }
@@ -304,7 +309,9 @@ class ScreenCaptureManager(private val context: Context) {
         density: Int,
         looperHandler: Handler
     ) {
-        val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3)
+        val reader = ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 3).apply {
+            setOnImageAvailableListener(imageAvailableListener, looperHandler)
+        }
         imageReader = reader
         virtualDisplay = projection.createVirtualDisplay(
             "AutoFishCapture",

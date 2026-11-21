@@ -114,7 +114,7 @@ class MinigameAnalyzer {
             return emptyResult()
         }
 
-        val colStep = max(1, regionWidth / 110)
+        val colStep = max(1, regionWidth / 240)
         val rowStep = max(1, trackHeight / 24)
 
         val sampleCols = (regionWidth / colStep) + 1
@@ -145,8 +145,8 @@ class MinigameAnalyzer {
 
                 val isTrackBlue = isTrackInteriorBlue(r, g, b)
                 val isBoxPixel = isBoxColor(r, g, b)
-                // Dark fish silhouette: strictly excludes empty blue track gradient (where b >= 135 & b - g >= 62)
-                val isDarkFish = r < 75 && g < 95 && b in 15..125 && (b - g) < 55
+                // Dark fish silhouette: matches (0,33,112) & (22,52,105) while rejecting track blue (g>=57, b>=140)
+                val isDarkFish = !isBoxPixel && r < 65 && g <= 54 && b in 15..134
                 // Light silver/cyan fish body outside the box
                 val isLightFish = !isBoxPixel && r in 75..220 && g >= 145 && b >= 185 && (b - r) <= 130
                 // Lime-green fish body overlapping inside the green box
@@ -166,8 +166,20 @@ class MinigameAnalyzer {
                 py += rowStep
             }
 
+            // Also probe just below the static bottom border for a hollow box's bottom green/yellow edge
+            var bottomOutlineHit = 0
+            val outlineCheckEnd = min(fullRegionHeight - 1, trackRelBottom + max(8, (trackHeight * 0.50f).toInt()))
+            for (oy in (trackRelBottom + 1)..outlineCheckEnd) {
+                val op = fullPixels[oy * regionWidth + px]
+                if (isBoxColor(Color.red(op), Color.green(op), Color.blue(op))) {
+                    bottomOutlineHit++
+                }
+            }
+
             if (colSamples > 0) {
-                boxScores[colIndex] = boxCount.toFloat() / colSamples
+                val baseBoxScore = boxCount.toFloat() / colSamples
+                val outlineBoost = if (bottomOutlineHit > 0) 0.20f else 0f
+                boxScores[colIndex] = (baseBoxScore + outlineBoost).coerceAtMost(1f)
                 darkFishScores[colIndex] = darkFishCount.toFloat() / colSamples
                 lightFishScores[colIndex] = lightFishCount.toFloat() / colSamples
                 brightFishScores[colIndex] = brightFishCount.toFloat() / colSamples
@@ -230,19 +242,49 @@ class MinigameAnalyzer {
         }
 
         val barSpanCols = if (bestStart >= 0 && bestEnd >= bestStart) (bestEnd - bestStart + 1) else 0
-        val barWidth = barSpanCols.toFloat() / max(1, colIndex)
-        val barX = if (bestStart >= 0 && bestEnergy >= 0.30f) {
-            val leftNorm = bestStart.toFloat() / max(1, colIndex - 1)
-            val rightNorm = bestEnd.toFloat() / max(1, colIndex - 1)
+        var finalStart = bestStart
+        var finalEnd = bestEnd
+        var finalSpanCols = barSpanCols
+
+        // If only a thin single vertical outline edge was grouped (hollow box with empty interior),
+        // look for its companion opposite edge within expected box width (5%..18% of track).
+        if (bestStart >= 0 && barSpanCols.toFloat() / max(1, colIndex) < 0.045f) {
+            val minPartnerDist = max(3, (colIndex * 0.05f).toInt())
+            val maxPartnerDist = max(minPartnerDist + 2, (colIndex * 0.18f).toInt())
+            var bestPartner = -1
+            var bestPartnerScore = 0f
+            for (d in minPartnerDist..maxPartnerDist) {
+                val rightCand = bestEnd + d
+                if (rightCand < colIndex && boxScores[rightCand] >= 0.14f && boxScores[rightCand] > bestPartnerScore) {
+                    bestPartnerScore = boxScores[rightCand]
+                    bestPartner = rightCand
+                }
+                val leftCand = bestStart - d
+                if (leftCand >= 0 && boxScores[leftCand] >= 0.14f && boxScores[leftCand] > bestPartnerScore) {
+                    bestPartnerScore = boxScores[leftCand]
+                    bestPartner = leftCand
+                }
+            }
+            if (bestPartner >= 0) {
+                finalStart = min(bestStart, bestPartner)
+                finalEnd = max(bestEnd, bestPartner)
+                finalSpanCols = finalEnd - finalStart + 1
+            }
+        }
+
+        val barWidth = finalSpanCols.toFloat() / max(1, colIndex)
+        val barX = if (finalStart >= 0 && bestEnergy >= 0.25f) {
+            val leftNorm = finalStart.toFloat() / max(1, colIndex - 1)
+            val rightNorm = finalEnd.toFloat() / max(1, colIndex - 1)
             ((leftNorm + rightNorm) * 0.5f).coerceIn(0f, 1f)
         } else {
             null
         }
 
         // Locate fish outside box (strongest contiguous dark/light fish cluster, ignoring box columns & 1px noise)
-        val darkOutsideX = findFishClusterOutsideBox(darkFishScores, colIndex, bestStart, bestEnd, minCols = 2)
+        val darkOutsideX = findFishClusterOutsideBox(darkFishScores, colIndex, finalStart, finalEnd, minCols = 2)
         val lightOutsideX = if (darkOutsideX == null) {
-            findFishClusterOutsideBox(lightFishScores, colIndex, bestStart, bestEnd, minCols = 2)
+            findFishClusterOutsideBox(lightFishScores, colIndex, finalStart, finalEnd, minCols = 2)
         } else {
             null
         }
@@ -252,24 +294,31 @@ class MinigameAnalyzer {
             darkOutsideX
         } else if (lightOutsideX != null) {
             lightOutsideX
-        } else if (barX != null && bestStart >= 0) {
+        } else if (barX != null && finalStart >= 0) {
             var overlapWeightedSum = 0f
             var overlapWeight = 0f
-            val spanStart = max(0, bestStart - 1)
-            val spanEnd = min(colIndex - 1, bestEnd + 1)
+            var unlitWeightedSum = 0f
+            var unlitWeight = 0f
+            val spanStart = max(0, finalStart - 1)
+            val spanEnd = min(colIndex - 1, finalEnd + 1)
             for (i in spanStart..spanEnd) {
+                val normX = i.toFloat() / max(1, colIndex - 1)
                 val w = brightFishScores[i]
                 if (w >= 0.14f) {
-                    val normX = i.toFloat() / max(1, colIndex - 1)
                     overlapWeightedSum += normX * w
                     overlapWeight += w
                 }
+                val u = darkFishScores[i] + lightFishScores[i]
+                if (u >= 0.16f) {
+                    unlitWeightedSum += normX * u
+                    unlitWeight += u
+                }
             }
             isFishInsideBar = true
-            if (overlapWeight > 0.14f) {
-                (overlapWeightedSum / overlapWeight).coerceIn(0f, 1f)
-            } else {
-                barX
+            when {
+                overlapWeight > 0.14f -> (overlapWeightedSum / overlapWeight).coerceIn(0f, 1f)
+                unlitWeight > 0.25f -> (unlitWeightedSum / unlitWeight).coerceIn(0f, 1f)
+                else -> barX
             }
         } else {
             null
@@ -500,10 +549,10 @@ class MinigameAnalyzer {
     }
 
     private fun isBoxColor(r: Int, g: Int, b: Int): Boolean {
-        val isGreenBox = g >= 145 && g > r + 35 && g > b + 25
+        val isGreenBox = g >= 108 && g > r + 40 && g > b + 40
         val isTealGreenBorder = g >= 120 && r <= 65 && (g - r) >= 55 && b <= 135
-        val isYellowBox = g >= 135 && r >= 125 && g > b + 45 && abs(r - g) <= 65
-        val isOrangeRedBox = r >= 165 && g in 45..165 && b <= 90 && (r - b) >= 95
+        val isYellowBox = g >= 125 && r >= 105 && g >= b + 35 && abs(r - g) <= 75
+        val isOrangeRedBox = r >= 130 && g in 35..165 && b <= 110 && (r - b) >= 65
         return isGreenBox || isTealGreenBorder || isYellowBox || isOrangeRedBox
     }
 
